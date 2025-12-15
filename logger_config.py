@@ -7,12 +7,15 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
-from typing import Optional
-
+from typing import Optional, Dict
 
 # Default log settings
 DEFAULT_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 DEFAULT_BACKUP_COUNT = 3
+
+# Cache for configured loggers to prevent duplicate handlers
+_configured_loggers: Dict[str, logging.Logger] = {}
+_log_file_path: Optional[Path] = None
 
 
 def setup_logger(
@@ -24,7 +27,9 @@ def setup_logger(
     log_dir: str = "logs"
 ) -> logging.Logger:
     """
-    Setup and configure logger with both console and rotating file handlers
+    Setup and configure logger with both console and rotating file handlers.
+    
+    Uses singleton pattern - subsequent calls with same name return existing logger.
     
     Args:
         name: Logger name
@@ -37,19 +42,25 @@ def setup_logger(
     Returns:
         Configured logger instance
     """
+    global _log_file_path
+    
+    # Return cached logger if already configured
+    if name in _configured_loggers:
+        return _configured_loggers[name]
+    
     logger = logging.getLogger(name)
     
-    # Avoid duplicate handlers
+    # Clear any existing handlers to prevent duplicates
     if logger.handlers:
-        return logger
+        logger.handlers.clear()
     
     logger.setLevel(log_level)
     
-    # Create formatters
-    console_formatter = logging.Formatter(
-        '%(message)s'  # Simple format for console
-    )
+    # Prevent propagation to root logger (avoids duplicate output)
+    logger.propagate = False
     
+    # Create formatters
+    console_formatter = logging.Formatter('%(message)s')
     file_formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
@@ -63,34 +74,37 @@ def setup_logger(
     
     # File handler with rotation (optional)
     if log_to_file:
-        # Create logs directory if it doesn't exist
         logs_dir = Path(log_dir)
         logs_dir.mkdir(exist_ok=True)
         
-        # Create log file with timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = logs_dir / f"ritual_rpa_{timestamp}.log"
+        # Reuse existing log file for current session
+        if _log_file_path is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            _log_file_path = logs_dir / f"ritual_rpa_{timestamp}.log"
         
-        # Use RotatingFileHandler for automatic log rotation
         file_handler = RotatingFileHandler(
-            log_file,
+            _log_file_path,
             maxBytes=max_bytes,
             backupCount=backup_count,
             encoding='utf-8'
         )
-        file_handler.setLevel(logging.DEBUG)  # More verbose in file
+        file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
         
-        logger.info(f"📝 Logging to file: {log_file}")
-        logger.debug(f"Log rotation: max {max_bytes/1024/1024:.1f}MB, {backup_count} backups")
+        # Only print log file message once (for first logger)
+        if len(_configured_loggers) == 0:
+            print(f"\n📝 Logging to file: {_log_file_path}\n")
+    
+    # Cache the configured logger
+    _configured_loggers[name] = logger
     
     return logger
 
 
 def get_logger(name: str = "RitualRPA") -> logging.Logger:
     """
-    Get existing logger or create a new one
+    Get existing logger or create a new one.
     
     Args:
         name: Logger name
@@ -98,21 +112,42 @@ def get_logger(name: str = "RitualRPA") -> logging.Logger:
     Returns:
         Logger instance
     """
-    return logging.getLogger(name)
+    if name in _configured_loggers:
+        return _configured_loggers[name]
+    return setup_logger(name)
 
 
-def set_log_level(level: int, name: str = "RitualRPA") -> None:
+def set_log_level(level: int, name: Optional[str] = None) -> None:
     """
-    Change log level for an existing logger
+    Change log level for an existing logger.
     
     Args:
         level: New logging level (e.g., logging.DEBUG)
-        name: Logger name
+        name: Logger name (None = all configured loggers)
     """
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
+    if name:
+        loggers = [logging.getLogger(name)] if name in _configured_loggers else []
+    else:
+        loggers = list(_configured_loggers.values())
     
-    # Also update handler levels
-    for handler in logger.handlers:
-        if isinstance(handler, logging.FileHandler):
-            handler.setLevel(level)
+    for logger in loggers:
+        logger.setLevel(level)
+        for handler in logger.handlers:
+            if isinstance(handler, logging.FileHandler):
+                handler.setLevel(level)
+
+
+def get_log_file_path() -> Optional[Path]:
+    """Get the current log file path."""
+    return _log_file_path
+
+
+def reset_loggers() -> None:
+    """Reset all loggers (useful for testing)."""
+    global _configured_loggers, _log_file_path
+    
+    for logger in _configured_loggers.values():
+        logger.handlers.clear()
+    
+    _configured_loggers.clear()
+    _log_file_path = None

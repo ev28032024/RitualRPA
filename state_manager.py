@@ -7,20 +7,24 @@ import os
 from datetime import datetime, date
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field, asdict
-from logger_config import setup_logger
+from logger_config import get_logger
 
-logger = setup_logger("StateManager", log_to_file=True)
+logger = get_logger("StateManager")
 
+
+# ============================================================================
+# DATA CLASSES
+# ============================================================================
 
 @dataclass
 class AccountProgress:
     """Прогресс аккаунта по получению bless/curse"""
-    bless_received: int = 0      # Сколько благословений получено (цель: 10)
-    curse_received: int = 0      # Сколько проклятий получено (цель: 10)
-    bless_given_today: int = 0   # Сколько благословений выдано сегодня
-    curse_given_today: int = 0   # Сколько проклятий выдано сегодня
-    last_action_date: str = ""   # Дата последнего действия
-    last_action_time: str = ""   # Время последнего действия
+    bless_received: int = 0
+    curse_received: int = 0
+    bless_given_today: int = 0
+    curse_given_today: int = 0
+    last_action_date: str = ""
+    last_action_time: str = ""
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -35,6 +39,16 @@ class AccountProgress:
             last_action_date=data.get("last_action_date", ""),
             last_action_time=data.get("last_action_time", "")
         )
+    
+    @property
+    def total_given_today(self) -> int:
+        """Total actions given today."""
+        return self.bless_given_today + self.curse_given_today
+    
+    def reset_daily(self) -> None:
+        """Reset daily counters."""
+        self.bless_given_today = 0
+        self.curse_given_today = 0
 
 
 @dataclass
@@ -60,9 +74,13 @@ class DailyStats:
         )
 
 
+# ============================================================================
+# STATE MANAGER
+# ============================================================================
+
 class StateManager:
     """
-    Управление состоянием автоматизации
+    Управление состоянием автоматизации.
     
     Отслеживает:
     - Прогресс каждого аккаунта (сколько bless/curse получено)
@@ -70,24 +88,33 @@ class StateManager:
     - История всех действий
     """
     
-    DEFAULT_DAILY_LIMIT = 5  # Максимум bless + curse выданных с одного аккаунта в день
-    DEFAULT_TARGET_COUNT = 10  # Цель: получить 10 bless и 10 curse
+    DEFAULT_DAILY_LIMIT = 5
+    DEFAULT_TARGET_COUNT = 10
     
     def __init__(self, state_file: str = "state.json"):
         self.state_file = state_file
         self.accounts: Dict[str, AccountProgress] = {}
         self.daily_stats: Dict[str, DailyStats] = {}
-        self.settings: Dict[str, Any] = {
+        self.settings: Dict[str, Any] = self._default_settings()
+        self._dirty = False  # Track if state needs saving
+        
+        self._load_state()
+    
+    def _default_settings(self) -> Dict[str, Any]:
+        """Get default settings."""
+        return {
             "daily_limit_per_account": self.DEFAULT_DAILY_LIMIT,
             "target_bless": self.DEFAULT_TARGET_COUNT,
             "target_curse": self.DEFAULT_TARGET_COUNT,
             "created_at": datetime.now().isoformat()
         }
-        
-        self._load_state()
+    
+    # ========================================================================
+    # STATE PERSISTENCE
+    # ========================================================================
     
     def _load_state(self) -> bool:
-        """Загрузить состояние из файла"""
+        """Загрузить состояние из файла."""
         if not os.path.exists(self.state_file):
             logger.info(f"State file not found, creating new: {self.state_file}")
             self._save_state()
@@ -97,27 +124,21 @@ class StateManager:
             with open(self.state_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
-            # Загрузка настроек
-            self.settings = data.get("settings", self.settings)
+            self.settings = data.get("settings", self._default_settings())
             
-            # Загрузка прогресса аккаунтов
-            accounts_data = data.get("accounts", {})
             self.accounts = {
                 name: AccountProgress.from_dict(progress)
-                for name, progress in accounts_data.items()
+                for name, progress in data.get("accounts", {}).items()
             }
             
-            # Загрузка дневной статистики
-            daily_data = data.get("daily_stats", {})
             self.daily_stats = {
                 day: DailyStats.from_dict(stats)
-                for day, stats in daily_data.items()
+                for day, stats in data.get("daily_stats", {}).items()
             }
             
-            # Сброс дневных счетчиков если новый день
             self._reset_daily_counters_if_needed()
             
-            logger.info(f"State loaded: {len(self.accounts)} accounts, {len(self.daily_stats)} days of history")
+            logger.debug(f"State loaded: {len(self.accounts)} accounts, {len(self.daily_stats)} days")
             return True
             
         except Exception as e:
@@ -125,7 +146,7 @@ class StateManager:
             return False
     
     def _save_state(self) -> bool:
-        """Сохранить состояние в файл"""
+        """Сохранить состояние в файл."""
         try:
             data = {
                 "settings": self.settings,
@@ -137,100 +158,115 @@ class StateManager:
             with open(self.state_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             
+            self._dirty = False
             return True
         except Exception as e:
             logger.error(f"Error saving state: {e}")
             return False
     
-    def _get_today(self) -> str:
-        """Получить сегодняшнюю дату в формате YYYY-MM-DD"""
+    def save_if_dirty(self) -> None:
+        """Save state only if it has been modified."""
+        if self._dirty:
+            self._save_state()
+    
+    # ========================================================================
+    # HELPERS
+    # ========================================================================
+    
+    @staticmethod
+    def _get_today() -> str:
+        """Получить сегодняшнюю дату в формате YYYY-MM-DD."""
         return date.today().isoformat()
     
     def _reset_daily_counters_if_needed(self) -> None:
-        """Сбросить дневные счетчики если наступил новый день"""
+        """Сбросить дневные счетчики если наступил новый день."""
         today = self._get_today()
+        reset_count = 0
         
         for name, account in self.accounts.items():
             if account.last_action_date and account.last_action_date != today:
-                logger.info(f"New day detected for {name}, resetting daily counters")
-                account.bless_given_today = 0
-                account.curse_given_today = 0
+                account.reset_daily()
+                reset_count += 1
         
-        self._save_state()
+        if reset_count > 0:
+            logger.info(f"New day: reset daily counters for {reset_count} accounts")
+            self._dirty = True
     
-    def _ensure_account_exists(self, account_name: str) -> None:
-        """Создать запись для аккаунта если не существует"""
+    def _ensure_account_exists(self, account_name: str) -> AccountProgress:
+        """Создать запись для аккаунта если не существует."""
         if account_name not in self.accounts:
             self.accounts[account_name] = AccountProgress()
             logger.info(f"Created new account progress: {account_name}")
+            self._dirty = True
+        return self.accounts[account_name]
     
     def _get_or_create_daily_stats(self) -> DailyStats:
-        """Получить или создать статистику за сегодня"""
+        """Получить или создать статистику за сегодня."""
         today = self._get_today()
         if today not in self.daily_stats:
             self.daily_stats[today] = DailyStats(date=today)
+            self._dirty = True
         return self.daily_stats[today]
     
-    def get_account_progress(self, account_name: str) -> AccountProgress:
-        """Получить прогресс аккаунта"""
-        self._ensure_account_exists(account_name)
-        return self.accounts[account_name]
+    # ========================================================================
+    # ACCOUNT QUERIES
+    # ========================================================================
     
-    def can_give_action_today(self, account_name: str, action_type: str = "any") -> Tuple[bool, str]:
+    def get_account_progress(self, account_name: str) -> AccountProgress:
+        """Получить прогресс аккаунта."""
+        return self._ensure_account_exists(account_name)
+    
+    def can_give_action_today(self, account_name: str) -> Tuple[bool, str]:
         """
-        Проверить может ли аккаунт выполнить действие сегодня
+        Проверить может ли аккаунт выполнить действие сегодня.
         
-        Args:
-            account_name: Имя аккаунта который выдаёт
-            action_type: "bless", "curse" или "any"
-            
         Returns:
-            (can_do, reason): Можно ли выполнить и причина если нет
+            (can_do, reason): Можно ли выполнить и причина
         """
-        self._ensure_account_exists(account_name)
         self._reset_daily_counters_if_needed()
         
-        account = self.accounts[account_name]
+        account = self._ensure_account_exists(account_name)
         daily_limit = self.settings["daily_limit_per_account"]
         
-        total_given_today = account.bless_given_today + account.curse_given_today
+        if account.total_given_today >= daily_limit:
+            return False, f"Daily limit reached ({account.total_given_today}/{daily_limit})"
         
-        if total_given_today >= daily_limit:
-            return False, f"Daily limit reached ({total_given_today}/{daily_limit})"
-        
-        remaining = daily_limit - total_given_today
+        remaining = daily_limit - account.total_given_today
         return True, f"Can do {remaining} more actions today"
     
     def needs_bless(self, account_name: str) -> Tuple[bool, int]:
-        """
-        Проверить нужны ли ещё bless аккаунту
-        
-        Returns:
-            (needs, remaining): Нужно ли и сколько ещё нужно
-        """
-        self._ensure_account_exists(account_name)
-        account = self.accounts[account_name]
+        """Проверить нужны ли ещё bless аккаунту."""
+        account = self._ensure_account_exists(account_name)
         target = self.settings["target_bless"]
         remaining = max(0, target - account.bless_received)
         return remaining > 0, remaining
     
     def needs_curse(self, account_name: str) -> Tuple[bool, int]:
-        """
-        Проверить нужны ли ещё curse аккаунту
-        
-        Returns:
-            (needs, remaining): Нужно ли и сколько ещё нужно
-        """
-        self._ensure_account_exists(account_name)
-        account = self.accounts[account_name]
+        """Проверить нужны ли ещё curse аккаунту."""
+        account = self._ensure_account_exists(account_name)
         target = self.settings["target_curse"]
         remaining = max(0, target - account.curse_received)
         return remaining > 0, remaining
     
-    def record_action(self, giver_name: str, receiver_name: str, 
-                      action_type: str, success: bool) -> None:
+    def get_remaining_today(self, account_name: str) -> int:
+        """Get remaining actions for today."""
+        account = self._ensure_account_exists(account_name)
+        daily_limit = self.settings["daily_limit_per_account"]
+        return max(0, daily_limit - account.total_given_today)
+    
+    # ========================================================================
+    # ACTION RECORDING
+    # ========================================================================
+    
+    def record_action(
+        self, 
+        giver_name: str, 
+        receiver_name: str, 
+        action_type: str, 
+        success: bool
+    ) -> None:
         """
-        Записать выполненное действие
+        Записать выполненное действие.
         
         Args:
             giver_name: Кто выдаёт (активный аккаунт)
@@ -238,17 +274,13 @@ class StateManager:
             action_type: "bless" или "curse"
             success: Успешно ли выполнено
         """
-        self._ensure_account_exists(giver_name)
-        self._ensure_account_exists(receiver_name)
+        giver = self._ensure_account_exists(giver_name)
+        receiver = self._ensure_account_exists(receiver_name)
         
         now = datetime.now()
         today = self._get_today()
         
-        giver = self.accounts[giver_name]
-        receiver = self.accounts[receiver_name]
-        
         if success:
-            # Обновляем счетчики выдачи
             if action_type == "bless":
                 giver.bless_given_today += 1
                 receiver.bless_received += 1
@@ -256,11 +288,10 @@ class StateManager:
                 giver.curse_given_today += 1
                 receiver.curse_received += 1
         
-        # Обновляем время последнего действия
         giver.last_action_date = today
         giver.last_action_time = now.strftime("%H:%M:%S")
         
-        # Записываем в дневную статистику
+        # Update daily stats
         daily = self._get_or_create_daily_stats()
         if giver_name not in daily.accounts_processed:
             daily.accounts_processed.append(giver_name)
@@ -281,55 +312,70 @@ class StateManager:
         
         self._save_state()
         
-        logger.info(
-            f"Recorded: {giver_name} -> {action_type} -> {receiver_name} "
-            f"(success={success})"
-        )
+        logger.info(f"Recorded: {giver_name} -> {action_type} -> {receiver_name} (success={success})")
     
-    def get_optimal_pairs(self, accounts: List[Dict[str, Any]], 
-                          max_actions: int = 10) -> List[Dict[str, Any]]:
+    # ========================================================================
+    # PAIR GENERATION
+    # ========================================================================
+    
+    def get_optimal_pairs(
+        self, 
+        accounts: List[Dict[str, Any]], 
+        max_actions: int = 10
+    ) -> List[Dict[str, Any]]:
         """
-        Получить оптимальный список пар (кто кому выдаёт) на сегодня
+        Получить оптимальный список пар на сегодня.
         
         Логика:
-        1. Фильтруем аккаунты которые могут выдавать (не достигли дневного лимита)
+        1. Фильтруем аккаунты которые могут выдавать
         2. Находим аккаунты которым нужны bless/curse
-        3. Строим пары с приоритетом тем кому больше нужно
-        
-        Args:
-            accounts: Список аккаунтов из конфига
-            max_actions: Максимум действий за сессию
-            
-        Returns:
-            Список пар для выполнения
+        3. Строим пары с приоритетом
         """
-        pairs = []
-        
-        # Создаём записи для всех аккаунтов
+        # Initialize all accounts
         for acc in accounts:
             self._ensure_account_exists(acc["name"])
         
-        # Находим кто может выдавать сегодня
-        available_givers = []
-        for acc in accounts:
-            can_give, reason = self.can_give_action_today(acc["name"])
-            if can_give:
-                progress = self.get_account_progress(acc["name"])
-                remaining = self.settings["daily_limit_per_account"] - (
-                    progress.bless_given_today + progress.curse_given_today
-                )
-                available_givers.append({
-                    **acc,
-                    "remaining_today": remaining,
-                    "progress": progress
-                })
+        self.save_if_dirty()
         
+        # Find available givers
+        available_givers = self._get_available_givers(accounts)
         if not available_givers:
             logger.warning("No accounts available to give actions today")
             return []
         
-        # Находим кому нужны bless/curse
+        # Find accounts needing bless/curse
+        needs_list = self._get_accounts_needing_actions(accounts)
+        if not needs_list:
+            logger.info("All accounts have reached their targets!")
+            return []
+        
+        # Build pairs
+        pairs = self._build_pairs(available_givers, needs_list, max_actions)
+        
+        logger.info(f"Planned {len(pairs)} actions for today")
+        return pairs
+    
+    def _get_available_givers(self, accounts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Get list of accounts that can give actions today."""
+        available = []
+        daily_limit = self.settings["daily_limit_per_account"]
+        
+        for acc in accounts:
+            can_give, _ = self.can_give_action_today(acc["name"])
+            if can_give:
+                progress = self.accounts[acc["name"]]
+                available.append({
+                    **acc,
+                    "remaining_today": daily_limit - progress.total_given_today,
+                    "progress": progress
+                })
+        
+        return available
+    
+    def _get_accounts_needing_actions(self, accounts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Get list of accounts that need bless/curse."""
         needs_list = []
+        
         for acc in accounts:
             needs_bless, bless_remaining = self.needs_bless(acc["name"])
             needs_curse, curse_remaining = self.needs_curse(acc["name"])
@@ -344,75 +390,86 @@ class StateManager:
                     "total_needed": bless_remaining + curse_remaining
                 })
         
-        if not needs_list:
-            logger.info("All accounts have reached their targets!")
-            return []
-        
-        # Сортируем по приоритету (кому больше нужно)
+        # Sort by priority (most needed first)
         needs_list.sort(key=lambda x: x["total_needed"], reverse=True)
-        
-        actions_planned = 0
+        return needs_list
+    
+    def _build_pairs(
+        self, 
+        givers: List[Dict[str, Any]], 
+        receivers: List[Dict[str, Any]], 
+        max_actions: int
+    ) -> List[Dict[str, Any]]:
+        """Build action pairs from givers and receivers."""
+        pairs = []
         giver_idx = 0
         
-        # Строим пары
-        for receiver in needs_list:
-            if actions_planned >= max_actions:
+        for receiver in receivers:
+            if len(pairs) >= max_actions:
                 break
             
-            # Для каждого получателя определяем что ему нужно
-            actions_for_receiver = []
-            
+            actions_needed = []
             if receiver["needs_bless"]:
-                actions_for_receiver.append("bless")
+                actions_needed.append("bless")
             if receiver["needs_curse"]:
-                actions_for_receiver.append("curse")
+                actions_needed.append("curse")
             
-            # Назначаем выдающего
-            for action_type in actions_for_receiver:
-                if actions_planned >= max_actions:
+            for action_type in actions_needed:
+                if len(pairs) >= max_actions:
                     break
                 
-                # Ищем свободного выдающего (не себе)
-                found_giver = None
-                for i in range(len(available_givers)):
-                    idx = (giver_idx + i) % len(available_givers)
-                    giver = available_givers[idx]
-                    
-                    if giver["name"] == receiver["name"]:
-                        continue  # Нельзя себе
-                    
-                    if giver["remaining_today"] > 0:
-                        found_giver = giver
-                        giver_idx = (idx + 1) % len(available_givers)
-                        break
+                # Find available giver (not self)
+                giver = self._find_available_giver(
+                    givers, 
+                    receiver["name"], 
+                    giver_idx
+                )
                 
-                if found_giver:
+                if giver:
                     pairs.append({
-                        "giver": found_giver,
+                        "giver": giver,
                         "receiver": receiver,
                         "action": action_type,
                         "index": len(pairs) + 1
                     })
-                    found_giver["remaining_today"] -= 1
-                    actions_planned += 1
+                    giver["remaining_today"] -= 1
+                    giver_idx = (givers.index(giver) + 1) % len(givers)
         
-        # Добавляем общее количество
-        for i, pair in enumerate(pairs):
+        # Add total count
+        for pair in pairs:
             pair["total"] = len(pairs)
         
-        logger.info(f"Planned {len(pairs)} actions for today")
         return pairs
     
-    def print_progress_report(self) -> None:
-        """Вывести отчёт о прогрессе всех аккаунтов"""
-        print("\n" + "="*70)
-        print("📊 ПРОГРЕСС АККАУНТОВ")
-        print("="*70)
+    def _find_available_giver(
+        self, 
+        givers: List[Dict[str, Any]], 
+        receiver_name: str, 
+        start_idx: int
+    ) -> Optional[Dict[str, Any]]:
+        """Find an available giver that is not the receiver."""
+        for i in range(len(givers)):
+            idx = (start_idx + i) % len(givers)
+            giver = givers[idx]
+            
+            if giver["name"] != receiver_name and giver["remaining_today"] > 0:
+                return giver
         
+        return None
+    
+    # ========================================================================
+    # REPORTING
+    # ========================================================================
+    
+    def print_progress_report(self) -> None:
+        """Вывести отчёт о прогрессе всех аккаунтов."""
         target_bless = self.settings["target_bless"]
         target_curse = self.settings["target_curse"]
         daily_limit = self.settings["daily_limit_per_account"]
         
+        print("\n" + "="*70)
+        print("📊 ПРОГРЕСС АККАУНТОВ")
+        print("="*70)
         print(f"🎯 Цель: {target_bless} bless + {target_curse} curse на каждом")
         print(f"📅 Дневной лимит: {daily_limit} действий с аккаунта")
         print("-"*70)
@@ -423,38 +480,52 @@ class StateManager:
             return
         
         for name, progress in sorted(self.accounts.items()):
-            bless_pct = (progress.bless_received / target_bless * 100) if target_bless > 0 else 100
-            curse_pct = (progress.curse_received / target_curse * 100) if target_curse > 0 else 100
-            
-            bless_bar = self._progress_bar(progress.bless_received, target_bless)
-            curse_bar = self._progress_bar(progress.curse_received, target_curse)
-            
-            daily_used = progress.bless_given_today + progress.curse_given_today
-            daily_remaining = daily_limit - daily_used
-            
-            status = "✅" if (bless_pct >= 100 and curse_pct >= 100) else "🔄"
-            
-            print(f"\n{status} {name}:")
-            print(f"   Bless: {bless_bar} {progress.bless_received}/{target_bless}")
-            print(f"   Curse: {curse_bar} {progress.curse_received}/{target_curse}")
-            print(f"   Сегодня выдано: {daily_used}/{daily_limit} (осталось: {daily_remaining})")
-            
-            if progress.last_action_time:
-                print(f"   Последнее действие: {progress.last_action_date} {progress.last_action_time}")
+            self._print_account_progress(name, progress, target_bless, target_curse, daily_limit)
         
-        print("\n" + "="*70)
+        self._print_total_progress(target_bless, target_curse)
+    
+    def _print_account_progress(
+        self, 
+        name: str, 
+        progress: AccountProgress,
+        target_bless: int,
+        target_curse: int,
+        daily_limit: int
+    ) -> None:
+        """Print progress for single account."""
+        bless_pct = (progress.bless_received / target_bless * 100) if target_bless > 0 else 100
+        curse_pct = (progress.curse_received / target_curse * 100) if target_curse > 0 else 100
         
-        # Общая статистика
+        bless_bar = self._progress_bar(progress.bless_received, target_bless)
+        curse_bar = self._progress_bar(progress.curse_received, target_curse)
+        
+        daily_remaining = daily_limit - progress.total_given_today
+        status = "✅" if (bless_pct >= 100 and curse_pct >= 100) else "🔄"
+        
+        print(f"\n{status} {name}:")
+        print(f"   Bless: {bless_bar} {progress.bless_received}/{target_bless}")
+        print(f"   Curse: {curse_bar} {progress.curse_received}/{target_curse}")
+        print(f"   Сегодня выдано: {progress.total_given_today}/{daily_limit} (осталось: {daily_remaining})")
+        
+        if progress.last_action_time:
+            print(f"   Последнее действие: {progress.last_action_date} {progress.last_action_time}")
+    
+    def _print_total_progress(self, target_bless: int, target_curse: int) -> None:
+        """Print total progress summary."""
         total_bless = sum(acc.bless_received for acc in self.accounts.values())
         total_curse = sum(acc.curse_received for acc in self.accounts.values())
         total_target = len(self.accounts) * (target_bless + target_curse)
         total_done = total_bless + total_curse
         
-        print(f"📈 Общий прогресс: {total_done}/{total_target} ({total_done/total_target*100:.1f}%)")
+        pct = (total_done / total_target * 100) if total_target > 0 else 0
+        
+        print("\n" + "="*70)
+        print(f"📈 Общий прогресс: {total_done}/{total_target} ({pct:.1f}%)")
         print("="*70 + "\n")
     
-    def _progress_bar(self, current: int, target: int, width: int = 20) -> str:
-        """Создать текстовый прогресс-бар"""
+    @staticmethod
+    def _progress_bar(current: int, target: int, width: int = 20) -> str:
+        """Создать текстовый прогресс-бар."""
         if target == 0:
             return "█" * width
         
@@ -462,35 +533,33 @@ class StateManager:
         empty = width - filled
         return "█" * filled + "░" * empty
     
+    # ========================================================================
+    # SUMMARY
+    # ========================================================================
+    
     def get_summary(self) -> Dict[str, Any]:
-        """Получить сводку состояния"""
+        """Получить сводку состояния."""
         target_bless = self.settings["target_bless"]
         target_curse = self.settings["target_curse"]
         
-        completed = 0
-        in_progress = 0
-        
-        for name, progress in self.accounts.items():
-            if (progress.bless_received >= target_bless and 
-                progress.curse_received >= target_curse):
-                completed += 1
-            else:
-                in_progress += 1
+        completed = sum(
+            1 for p in self.accounts.values()
+            if p.bless_received >= target_bless and p.curse_received >= target_curse
+        )
         
         return {
             "total_accounts": len(self.accounts),
             "completed": completed,
-            "in_progress": in_progress,
+            "in_progress": len(self.accounts) - completed,
             "target_bless": target_bless,
             "target_curse": target_curse,
             "daily_limit": self.settings["daily_limit_per_account"]
         }
     
     def update_settings(self, **kwargs) -> None:
-        """Обновить настройки"""
+        """Обновить настройки."""
         for key, value in kwargs.items():
             if key in self.settings:
                 self.settings[key] = value
                 logger.info(f"Setting updated: {key} = {value}")
         self._save_state()
-

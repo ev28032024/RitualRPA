@@ -8,8 +8,15 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from dataclasses import dataclass, asdict
 
-from google_sheets import GoogleSheetsReader, GoogleSheetsServiceAccount, create_reader
+from google_sheets import create_reader
+from logger_config import get_logger
 
+logger = get_logger("AccountManager")
+
+
+# ============================================================================
+# DATA CLASSES
+# ============================================================================
 
 @dataclass
 class Account:
@@ -19,14 +26,13 @@ class Account:
     discord_username: str
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary"""
+        """Convert to dictionary."""
         return asdict(self)
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Account':
-        """Create Account from dictionary"""
+        """Create Account from dictionary."""
         adspower_id = data.get("adspower_id", "")
-        # Convert to string if it's a number
         if isinstance(adspower_id, (int, float)):
             adspower_id = str(int(adspower_id))
         
@@ -37,41 +43,20 @@ class Account:
         )
     
     def is_serial_number(self) -> bool:
-        """
-        Check if adspower_id is a serial number (numeric) or profile ID (alphanumeric)
-        
-        Returns:
-            bool: True if adspower_id is a numeric serial number
-        """
+        """Check if adspower_id is a serial number (numeric)."""
         return self.adspower_id.isdigit() and len(self.adspower_id) > 0
     
     def get_serial_number(self) -> Optional[int]:
-        """
-        Get serial number if adspower_id is numeric
-        
-        Returns:
-            int or None: Serial number if numeric, None otherwise
-        """
-        if self.is_serial_number():
-            return int(self.adspower_id)
-        return None
+        """Get serial number if adspower_id is numeric."""
+        return int(self.adspower_id) if self.is_serial_number() else None
     
     def get_profile_id(self) -> Optional[str]:
-        """
-        Get profile ID if adspower_id is not numeric
-        
-        Returns:
-            str or None: Profile ID if alphanumeric, None otherwise
-        """
-        if not self.is_serial_number():
-            return self.adspower_id
-        return None
+        """Get profile ID if adspower_id is not numeric."""
+        return None if self.is_serial_number() else self.adspower_id
     
     def get_display_identifier(self) -> str:
-        """Get human-readable identifier for logging"""
-        if self.is_serial_number():
-            return f"#{self.adspower_id}"
-        return self.adspower_id
+        """Get human-readable identifier for logging."""
+        return f"#{self.adspower_id}" if self.is_serial_number() else self.adspower_id
 
 
 @dataclass
@@ -84,9 +69,12 @@ class ExecutionLogEntry:
     message: str = ""
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary"""
         return asdict(self)
 
+
+# ============================================================================
+# ACCOUNT MANAGER
+# ============================================================================
 
 class AccountManager:
     """Manages account configurations and execution status"""
@@ -100,7 +88,7 @@ class AccountManager:
     
     def __init__(self, config_path: str = "config.json") -> None:
         """
-        Initialize account manager
+        Initialize account manager.
         
         Args:
             config_path: Path to configuration JSON file
@@ -111,37 +99,28 @@ class AccountManager:
         self.execution_log: List[ExecutionLogEntry] = []
         self._validation_errors: List[str] = []
         self._validation_warnings: List[str] = []
-        
+    
+    # ========================================================================
+    # CONFIG LOADING
+    # ========================================================================
+    
     def load_config(self) -> bool:
         """
-        Load configuration from JSON file
-        Supports loading accounts from Google Sheets if configured
+        Load configuration from JSON file.
+        Supports loading accounts from Google Sheets if configured.
         
         Returns:
-            bool: True if loaded successfully
+            True if loaded successfully
         """
         try:
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 self.config = json.load(f)
             
-            # Check if Google Sheets is configured
-            google_sheets_config = self.config.get("google_sheets", {})
-            google_sheets_url = google_sheets_config.get("url", "") or self.config.get("google_sheets_url", "")
+            # Try Google Sheets first, then fall back to config file
+            if not self._try_load_from_google_sheets():
+                self._load_accounts_from_config()
             
-            if google_sheets_url and google_sheets_config.get("enabled", True):
-                # Load accounts from Google Sheets
-                if not self._load_accounts_from_google_sheets(google_sheets_url, google_sheets_config):
-                    return False
-            else:
-                # Load accounts from config file
-                raw_accounts = self.config.get("accounts", [])
-                self.accounts = [Account.from_dict(acc) for acc in raw_accounts if isinstance(acc, dict)]
-            
-            # Validate configuration
-            if not self._validate_config():
-                return False
-            
-            return True
+            return self._validate_config()
             
         except FileNotFoundError:
             print(f"❌ Config file not found: {self.config_path}")
@@ -153,41 +132,41 @@ class AccountManager:
             print(f"❌ Error loading config: {e}")
             return False
     
-    def _load_accounts_from_google_sheets(self, url: str, config: Dict[str, Any]) -> bool:
+    def _load_accounts_from_config(self) -> None:
+        """Load accounts from config file."""
+        raw_accounts = self.config.get("accounts", [])
+        self.accounts = [
+            Account.from_dict(acc) 
+            for acc in raw_accounts 
+            if isinstance(acc, dict)
+        ]
+    
+    def _try_load_from_google_sheets(self) -> bool:
         """
-        Load accounts from Google Sheets
+        Try to load accounts from Google Sheets.
         
-        Supports two modes:
-        - Public access (no credentials needed, table must be shared publicly)
-        - Service Account (credentials.json required, table shared with service email)
-        
-        Args:
-            url: Google Sheets URL
-            config: Google Sheets configuration dict
-            
         Returns:
-            bool: True if loaded successfully
+            True if loaded from Google Sheets, False to use config file
         """
+        gs_config = self.config.get("google_sheets", {})
+        gs_url = gs_config.get("url", "") or self.config.get("google_sheets_url", "")
+        
+        if not gs_url or not gs_config.get("enabled", True):
+            return False
+        
         try:
-            sheet_gid = config.get("sheet_gid")
-            sheet_name = config.get("sheet_name")
-            credentials_path = config.get("credentials_path")
+            credentials_path = gs_config.get("credentials_path")
+            mode = "Service Account" if credentials_path else "публичный доступ"
+            print(f"📊 Загрузка аккаунтов из Google Sheets ({mode})...")
             
-            # Determine access mode
-            if credentials_path:
-                print(f"📊 Загрузка аккаунтов из Google Sheets (Service Account)...")
-            else:
-                print(f"📊 Загрузка аккаунтов из Google Sheets (публичный доступ)...")
-            
-            # Create appropriate reader
             reader = create_reader(
-                url,
+                gs_url,
                 credentials_path=credentials_path,
-                sheet_name=sheet_name,
-                sheet_gid=sheet_gid
+                sheet_name=gs_config.get("sheet_name"),
+                sheet_gid=gs_config.get("sheet_gid")
             )
             
-            # Show service account email for debugging
+            # Show service account email
             if credentials_path and hasattr(reader, 'get_service_account_email'):
                 email = reader.get_service_account_email()
                 if email:
@@ -195,65 +174,56 @@ class AccountManager:
             
             raw_accounts, warnings = reader.fetch_accounts()
             
-            # Show warnings
             for warning in warnings:
                 print(f"⚠️ {warning}")
             
-            # Convert to Account objects
             self.accounts = [Account.from_dict(acc) for acc in raw_accounts]
-            
-            print(f"✅ Загружено {len(self.accounts)} аккаунтов из Google Sheets")
-            
-            # Update config with loaded accounts for consistency
             self.config["accounts"] = raw_accounts
             
+            print(f"✅ Загружено {len(self.accounts)} аккаунтов из Google Sheets")
             return True
             
         except FileNotFoundError as e:
             print(f"❌ {e}")
-            return False
         except PermissionError as e:
             print(f"❌ {e}")
-            return False
         except ImportError as e:
             print(f"❌ {e}")
-            return False
         except ValueError as e:
             print(f"❌ Ошибка Google Sheets: {e}")
-            return False
         except ConnectionError as e:
             print(f"❌ Ошибка подключения к Google Sheets: {e}")
-            return False
         except Exception as e:
             print(f"❌ Не удалось загрузить из Google Sheets: {e}")
-            return False
+        
+        return False
     
-    def _is_placeholder_value(self, value: str) -> bool:
-        """Check if value looks like a placeholder"""
-        value_upper = value.upper()
-        return any(pattern in value_upper for pattern in self.PLACEHOLDER_PATTERNS)
+    # ========================================================================
+    # VALIDATION
+    # ========================================================================
     
     def _validate_config(self) -> bool:
-        """
-        Validate configuration structure and values
+        """Validate configuration structure and values."""
+        self._validation_errors.clear()
+        self._validation_warnings.clear()
         
-        Returns:
-            bool: True if configuration is valid
-            
-        Raises:
-            ConfigurationError: If configuration has critical errors
-        """
-        self._validation_errors = []
-        self._validation_warnings = []
-        
-        # Check required fields
         if not self.config:
             self._validation_errors.append("Configuration is empty")
             self._print_validation_results()
             return False
         
-        # Validate Discord channel URL
+        self._validate_discord_url()
+        self._validate_delays()
+        self._validate_accounts_exist()
+        self._validate_account_fields()
+        
+        self._print_validation_results()
+        return len(self._validation_errors) == 0
+    
+    def _validate_discord_url(self) -> None:
+        """Validate Discord channel URL."""
         channel_url = self.config.get("discord_channel_url", "")
+        
         if not channel_url:
             self._validation_errors.append("discord_channel_url is not configured")
         elif not channel_url.startswith("https://discord.com/"):
@@ -261,71 +231,79 @@ class AccountManager:
                 f"Invalid discord_channel_url: {channel_url}\n"
                 "   Must start with: https://discord.com/"
             )
-        
-        # Validate delay values
-        delay_between_accounts = self.config.get("delay_between_accounts", 8)
-        delay_between_commands = self.config.get("delay_between_commands", 5)
-        
-        if not isinstance(delay_between_accounts, (int, float)) or delay_between_accounts < 0:
-            self._validation_errors.append(
-                f"Invalid delay_between_accounts: {delay_between_accounts} (must be non-negative number)"
-            )
-        
-        if not isinstance(delay_between_commands, (int, float)) or delay_between_commands < 0:
-            self._validation_errors.append(
-                f"Invalid delay_between_commands: {delay_between_commands} (must be non-negative number)"
-            )
-        
-        # Validate accounts
+    
+    def _validate_delays(self) -> None:
+        """Validate delay values."""
+        for key in ["delay_between_accounts", "delay_between_commands"]:
+            value = self.config.get(key, 0)
+            if not isinstance(value, (int, float)) or value < 0:
+                self._validation_errors.append(
+                    f"Invalid {key}: {value} (must be non-negative number)"
+                )
+    
+    def _validate_accounts_exist(self) -> None:
+        """Validate that accounts are configured."""
         if not self.accounts:
-            google_sheets_url = self.config.get("google_sheets", {}).get("url", "") or self.config.get("google_sheets_url", "")
-            if google_sheets_url:
-                self._validation_errors.append("Не удалось загрузить аккаунты из Google Sheets")
+            gs_url = (
+                self.config.get("google_sheets", {}).get("url", "") or 
+                self.config.get("google_sheets_url", "")
+            )
+            if gs_url:
+                self._validation_errors.append(
+                    "Не удалось загрузить аккаунты из Google Sheets"
+                )
             else:
-                self._validation_errors.append("No accounts configured (add to config or use google_sheets_url)")
-        
-        # Validate each account
+                self._validation_errors.append(
+                    "No accounts configured (add to config or use google_sheets_url)"
+                )
+    
+    def _validate_account_fields(self) -> None:
+        """Validate each account's fields."""
         for i, account in enumerate(self.accounts):
-            account_num = i + 1
+            num = i + 1
             
             if not account.name:
-                self._validation_errors.append(f"Account {account_num}: 'name' is required")
+                self._validation_errors.append(f"Account {num}: 'name' is required")
             
-            # Validate AdsPower profile identifier
-            if not account.adspower_id:
+            self._validate_adspower_id(account, num)
+            self._validate_discord_username(account, num)
+    
+    def _validate_adspower_id(self, account: Account, num: int) -> None:
+        """Validate account's adspower_id."""
+        if not account.adspower_id:
+            self._validation_errors.append(
+                f"Account {num} ({account.name}): 'adspower_id' is required"
+            )
+        elif self._is_placeholder_value(account.adspower_id):
+            self._validation_errors.append(
+                f"Account {num} ({account.name}): adspower_id contains placeholder value\n"
+                f"   Please replace '{account.adspower_id}' with actual AdsPower profile ID"
+            )
+        elif account.is_serial_number():
+            serial = account.get_serial_number()
+            if serial is not None and serial <= 0:
                 self._validation_errors.append(
-                    f"Account {account_num} ({account.name}): 'adspower_id' is required"
+                    f"Account {num} ({account.name}): serial number must be positive"
                 )
-            elif self._is_placeholder_value(account.adspower_id):
-                # Placeholder in adspower_id is an ERROR
-                self._validation_errors.append(
-                    f"Account {account_num} ({account.name}): adspower_id contains placeholder value\n"
-                    f"   Please replace '{account.adspower_id}' with actual AdsPower profile ID or serial number"
-                )
-            elif account.is_serial_number():
-                # Validate serial number is positive
-                serial = account.get_serial_number()
-                if serial is not None and serial <= 0:
-                    self._validation_errors.append(
-                        f"Account {account_num} ({account.name}): serial number must be a positive integer"
-                    )
-            
-            if not account.discord_username:
-                self._validation_errors.append(
-                    f"Account {account_num} ({account.name}): 'discord_username' is required"
-                )
-            elif account.discord_username.lower().startswith("username"):
-                # Username placeholder is a warning (might be intentional)
-                self._validation_warnings.append(
-                    f"Account {account_num} ({account.name}): discord_username looks like a placeholder: {account.discord_username}"
-                )
-        
-        # Print results and return
-        self._print_validation_results()
-        return len(self._validation_errors) == 0
+    
+    def _validate_discord_username(self, account: Account, num: int) -> None:
+        """Validate account's discord_username."""
+        if not account.discord_username:
+            self._validation_errors.append(
+                f"Account {num} ({account.name}): 'discord_username' is required"
+            )
+        elif account.discord_username.lower().startswith("username"):
+            self._validation_warnings.append(
+                f"Account {num} ({account.name}): discord_username looks like placeholder"
+            )
+    
+    def _is_placeholder_value(self, value: str) -> bool:
+        """Check if value looks like a placeholder."""
+        value_upper = value.upper()
+        return any(pattern in value_upper for pattern in self.PLACEHOLDER_PATTERNS)
     
     def _print_validation_results(self) -> None:
-        """Print validation errors and warnings"""
+        """Print validation errors and warnings."""
         for error in self._validation_errors:
             print(f"❌ {error}")
         
@@ -337,13 +315,14 @@ class AccountManager:
         elif not self._validation_errors:
             print(f"✅ Configuration valid with {len(self._validation_warnings)} warning(s)")
     
+    # ========================================================================
+    # ACCOUNT QUERIES
+    # ========================================================================
+    
     def get_account_pairs(self) -> List[Dict[str, Any]]:
         """
-        Get account pairs for blessing/cursing (паровозик)
-        Each account blesses/curses the next one in the chain
-        
-        Returns:
-            list: List of dicts with 'current' and 'target' account info
+        Get account pairs for blessing/cursing (паровозик).
+        Each account blesses/curses the next one in the chain.
         """
         if not self.accounts:
             print("⚠️ No accounts configured")
@@ -351,13 +330,11 @@ class AccountManager:
         
         if len(self.accounts) < 2:
             print("⚠️ Need at least 2 accounts for chain mode")
-            # Single account can still target itself (if allowed by Discord)
         
         pairs = []
         total = len(self.accounts)
         
         for i, account in enumerate(self.accounts):
-            # Next account in chain (wraps around to first)
             next_index = (i + 1) % total
             target_account = self.accounts[next_index]
             
@@ -371,68 +348,49 @@ class AccountManager:
         return pairs
     
     def get_config_value(self, key: str, default: Any = None) -> Any:
-        """
-        Get configuration value
-        
-        Args:
-            key: Configuration key
-            default: Default value if key not found
-            
-        Returns:
-            Configuration value or default
-        """
+        """Get configuration value."""
         return self.config.get(key, default) if self.config else default
     
-    def log_execution(self, account_name: str, action: str, success: bool, message: str = "") -> None:
-        """
-        Log execution result for an account action
-        
-        Args:
-            account_name: Name of the account
-            action: Action performed (e.g., 'bless', 'curse', 'skip', 'error')
-            success: Whether action was successful
-            message: Additional context or error message
-        """
-        log_entry = ExecutionLogEntry(
+    # ========================================================================
+    # EXECUTION LOGGING
+    # ========================================================================
+    
+    def log_execution(
+        self, 
+        account_name: str, 
+        action: str, 
+        success: bool, 
+        message: str = ""
+    ) -> None:
+        """Log execution result for an account action."""
+        self.execution_log.append(ExecutionLogEntry(
             timestamp=datetime.now().isoformat(),
             account=account_name,
             action=action,
             success=success,
             message=message
-        )
-        self.execution_log.append(log_entry)
+        ))
     
     def get_execution_stats(self) -> Dict[str, Any]:
-        """
-        Get execution statistics
-        
-        Returns:
-            dict: Statistics including total, successful, failed counts
-        """
+        """Get execution statistics."""
         command_actions = ["bless", "curse"]
-        command_logs = [log for log in self.execution_log if log.action in command_actions]
+        command_logs = [
+            log for log in self.execution_log 
+            if log.action in command_actions
+        ]
         
         total = len(command_logs)
         successful = len([log for log in command_logs if log.success])
-        failed = total - successful
         
         return {
             "total": total,
             "successful": successful,
-            "failed": failed,
+            "failed": total - successful,
             "success_rate": (successful / total * 100) if total > 0 else 0.0
         }
     
     def print_summary(self) -> None:
-        """
-        Print execution summary to console
-        
-        Displays:
-        - Total actions performed
-        - Successful vs failed actions
-        - Success rate percentage
-        - List of failed actions with details
-        """
+        """Print execution summary to console."""
         print("\n" + "="*60)
         print("📊 EXECUTION SUMMARY")
         print("="*60)
@@ -443,13 +401,15 @@ class AccountManager:
         print(f"✅ Successful: {stats['successful']}")
         print(f"❌ Failed: {stats['failed']}")
         
-        # Success rate
         if stats['total'] > 0:
             print(f"🎯 Success rate: {stats['success_rate']:.1f}%")
         
         # List failed actions
         command_actions = ["bless", "curse"]
-        failed_logs = [log for log in self.execution_log if not log.success and log.action in command_actions]
+        failed_logs = [
+            log for log in self.execution_log 
+            if not log.success and log.action in command_actions
+        ]
         
         if failed_logs:
             print("\n⚠️ Failed actions:")
@@ -459,12 +419,7 @@ class AccountManager:
         print("="*60 + "\n")
     
     def save_log(self, filename: str = "execution_log.json") -> None:
-        """
-        Save execution log to JSON file
-        
-        Args:
-            filename: Output filename (default: execution_log.json)
-        """
+        """Save execution log to JSON file."""
         try:
             log_data = [entry.to_dict() for entry in self.execution_log]
             with open(filename, 'w', encoding='utf-8') as f:
