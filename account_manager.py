@@ -1,11 +1,14 @@
 """
 Account Manager
 Manages account configurations and execution tracking
+Supports loading accounts from config.json or Google Sheets
 """
 import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from dataclasses import dataclass, asdict
+
+from google_sheets import GoogleSheetsReader, GoogleSheetsServiceAccount, create_reader
 
 
 @dataclass
@@ -112,6 +115,7 @@ class AccountManager:
     def load_config(self) -> bool:
         """
         Load configuration from JSON file
+        Supports loading accounts from Google Sheets if configured
         
         Returns:
             bool: True if loaded successfully
@@ -120,15 +124,23 @@ class AccountManager:
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 self.config = json.load(f)
             
-            # Parse accounts into Account objects
-            raw_accounts = self.config.get("accounts", [])
-            self.accounts = [Account.from_dict(acc) for acc in raw_accounts if isinstance(acc, dict)]
+            # Check if Google Sheets is configured
+            google_sheets_config = self.config.get("google_sheets", {})
+            google_sheets_url = google_sheets_config.get("url", "") or self.config.get("google_sheets_url", "")
+            
+            if google_sheets_url and google_sheets_config.get("enabled", True):
+                # Load accounts from Google Sheets
+                if not self._load_accounts_from_google_sheets(google_sheets_url, google_sheets_config):
+                    return False
+            else:
+                # Load accounts from config file
+                raw_accounts = self.config.get("accounts", [])
+                self.accounts = [Account.from_dict(acc) for acc in raw_accounts if isinstance(acc, dict)]
             
             # Validate configuration
             if not self._validate_config():
                 return False
             
-            print(f"✅ Loaded {len(self.accounts)} accounts from config")
             return True
             
         except FileNotFoundError:
@@ -139,6 +151,81 @@ class AccountManager:
             return False
         except Exception as e:
             print(f"❌ Error loading config: {e}")
+            return False
+    
+    def _load_accounts_from_google_sheets(self, url: str, config: Dict[str, Any]) -> bool:
+        """
+        Load accounts from Google Sheets
+        
+        Supports two modes:
+        - Public access (no credentials needed, table must be shared publicly)
+        - Service Account (credentials.json required, table shared with service email)
+        
+        Args:
+            url: Google Sheets URL
+            config: Google Sheets configuration dict
+            
+        Returns:
+            bool: True if loaded successfully
+        """
+        try:
+            sheet_gid = config.get("sheet_gid")
+            sheet_name = config.get("sheet_name")
+            credentials_path = config.get("credentials_path")
+            
+            # Determine access mode
+            if credentials_path:
+                print(f"📊 Загрузка аккаунтов из Google Sheets (Service Account)...")
+            else:
+                print(f"📊 Загрузка аккаунтов из Google Sheets (публичный доступ)...")
+            
+            # Create appropriate reader
+            reader = create_reader(
+                url,
+                credentials_path=credentials_path,
+                sheet_name=sheet_name,
+                sheet_gid=sheet_gid
+            )
+            
+            # Show service account email for debugging
+            if credentials_path and hasattr(reader, 'get_service_account_email'):
+                email = reader.get_service_account_email()
+                if email:
+                    print(f"   Service Account: {email}")
+            
+            raw_accounts, warnings = reader.fetch_accounts()
+            
+            # Show warnings
+            for warning in warnings:
+                print(f"⚠️ {warning}")
+            
+            # Convert to Account objects
+            self.accounts = [Account.from_dict(acc) for acc in raw_accounts]
+            
+            print(f"✅ Загружено {len(self.accounts)} аккаунтов из Google Sheets")
+            
+            # Update config with loaded accounts for consistency
+            self.config["accounts"] = raw_accounts
+            
+            return True
+            
+        except FileNotFoundError as e:
+            print(f"❌ {e}")
+            return False
+        except PermissionError as e:
+            print(f"❌ {e}")
+            return False
+        except ImportError as e:
+            print(f"❌ {e}")
+            return False
+        except ValueError as e:
+            print(f"❌ Ошибка Google Sheets: {e}")
+            return False
+        except ConnectionError as e:
+            print(f"❌ Ошибка подключения к Google Sheets: {e}")
+            return False
+        except Exception as e:
+            print(f"❌ Не удалось загрузить из Google Sheets: {e}")
             return False
     
     def _is_placeholder_value(self, value: str) -> bool:
@@ -191,7 +278,11 @@ class AccountManager:
         
         # Validate accounts
         if not self.accounts:
-            self._validation_errors.append("No accounts configured")
+            google_sheets_url = self.config.get("google_sheets", {}).get("url", "") or self.config.get("google_sheets_url", "")
+            if google_sheets_url:
+                self._validation_errors.append("Не удалось загрузить аккаунты из Google Sheets")
+            else:
+                self._validation_errors.append("No accounts configured (add to config or use google_sheets_url)")
         
         # Validate each account
         for i, account in enumerate(self.accounts):

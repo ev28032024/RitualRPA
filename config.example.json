@@ -4,6 +4,14 @@
     
     "mode": "smart",
     
+    "_comment_google_sheets": "Аккаунты из Google Sheets. Два режима: публичный (без credentials) или Service Account (с credentials_path)",
+    "google_sheets": {
+        "enabled": false,
+        "url": "https://docs.google.com/spreadsheets/d/YOUR_SPREADSHEET_ID/edit",
+        "sheet_gid": 0,
+        "credentials_path": ""
+    },
+    
     "modes": {
         "chain": {
             "description": "Паровозик - каждый аккаунт кидает на следующего по кругу",
