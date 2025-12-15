@@ -1,0 +1,32 @@
+{
+    "adspower_api_url": "http://localhost:50325",
+    "discord_channel_url": "https://discord.com/channels/YOUR_SERVER_ID/YOUR_CHANNEL_ID",
+    "delay_between_accounts": 8,
+    "delay_between_commands": 5,
+    "timing": {
+        "typing_delay_min": 50,
+        "typing_delay_max": 150,
+        "action_delay_min": 200,
+        "action_delay_max": 500,
+        "autocomplete_wait": 2.0,
+        "command_submit_wait": 3.0,
+        "bot_response_timeout": 5.0
+    },
+    "accounts": [
+        {
+            "name": "Account 1",
+            "adspower_id": "jxxxxxxx",
+            "discord_username": "user1"
+        },
+        {
+            "name": "Account 2",
+            "adspower_id": "2",
+            "discord_username": "user2"
+        },
+        {
+            "name": "Account 3",
+            "adspower_id": "3",
+            "discord_username": "user3"
+        }
+    ]
+}
