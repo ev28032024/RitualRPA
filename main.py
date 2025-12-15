@@ -351,6 +351,7 @@ async def execute_action(
     action_type: str,
     channel_url: str,
     timing_config: TimingConfig,
+    account_mgr: Optional[AccountManager] = None,
     state_mgr: Optional[StateManager] = None
 ) -> bool:
     """Выполнить одно действие (bless или curse)."""
@@ -359,6 +360,14 @@ async def execute_action(
     receiver_name = receiver.get("name", "Unknown")
     receiver_discord = receiver.get("discord_username")
     adspower_id = giver.get("adspower_id", "")
+    
+    # Проверка на заблокированный аккаунт
+    if account_mgr and account_mgr.is_account_blocked(giver_name, adspower_id):
+        blocked_data = account_mgr._blocked_accounts.get(giver_name, {})
+        reason = blocked_data.get("reason", "Неизвестная причина")
+        print(f"🚫 Аккаунт {giver_name} заблокирован: {reason}")
+        print(f"   Пропускаю это действие...")
+        return False
     
     # Создаём идентификатор профиля
     profile = ProfileIdentifier.from_adspower_id(adspower_id, giver_name)
@@ -402,6 +411,9 @@ async def execute_action(
         receiver_discord,
         giver_name,
         receiver_name,
+        adspower_id,
+        giver.get("discord_username"),
+        account_mgr,
         state_mgr
     )
     
@@ -430,6 +442,9 @@ async def _execute_discord_action(
     target_discord: str,
     giver_name: str,
     receiver_name: str,
+    adspower_id: str,
+    discord_username: Optional[str],
+    account_mgr: Optional[AccountManager],
     state_mgr: Optional[StateManager]
 ) -> bool:
     """Выполнить Discord команду в браузере."""
@@ -448,8 +463,29 @@ async def _execute_discord_action(
             print(f"\n🔗 Переход в канал Discord...")
             if not await discord.navigate_to_channel(channel_url):
                 print(f"❌ Не удалось открыть канал")
-                if not await discord.verify_discord_login():
+                
+                # Проверяем, авторизован ли аккаунт
+                is_logged_in = await discord.verify_discord_login()
+                
+                if not is_logged_in:
                     print(f"   💡 Возможно аккаунт не авторизован в Discord!")
+                    # Не блокируем, если проблема в авторизации
+                else:
+                    # Аккаунт авторизован, но не может открыть канал - проблема с доступом
+                    access_error = await discord._check_channel_access()
+                    error_message = access_error if access_error else "Не удалось открыть канал (возможно нет доступа)"
+                    
+                    print(f"   🚫 Обнаружена проблема с доступом: {error_message}")
+                    
+                    # Блокируем аккаунт
+                    if account_mgr:
+                        account_mgr.block_account(
+                            account_name=giver_name,
+                            adspower_id=adspower_id,
+                            reason=f"Нет доступа к каналу: {error_message[:100]}",
+                            discord_username=discord_username
+                        )
+                
                 return False
             
             # Выполнение команды
@@ -496,6 +532,13 @@ async def run_session(
     accounts = account_mgr.get_config_value("accounts", [])
     modes_config = account_mgr.get_config_value("modes", {})
     
+    # Фильтруем заблокированные аккаунты
+    accounts = account_mgr.filter_blocked_accounts(accounts)
+    
+    if not accounts:
+        print("\n⚠️ Все аккаунты заблокированы или отсутствуют!")
+        return
+    
     # Генерируем пары
     pairs = _generate_pairs_for_mode(mode, accounts, modes_config, state_mgr, limits, max_actions)
     
@@ -516,7 +559,7 @@ async def run_session(
     
     # Выполнение
     completed, failed = await _execute_pairs(
-        pairs, adspower, channel_url, timing, delays, pauses, state_mgr, mode
+        pairs, adspower, channel_url, timing, delays, pauses, account_mgr, state_mgr, mode
     )
     
     _print_session_summary(completed, failed)
@@ -593,6 +636,7 @@ async def _execute_pairs(
     timing: TimingConfig,
     delays: DelayConfig,
     pauses: RandomPauseConfig,
+    account_mgr: AccountManager,
     state_mgr: StateManager,
     mode: str
 ) -> tuple:
@@ -600,6 +644,7 @@ async def _execute_pairs(
     completed = 0
     failed = 0
     current_giver = None
+    last_action_success = True  # Флаг успеха предыдущего действия
     
     for i, pair in enumerate(pairs):
         if shutdown_handler.is_shutting_down:
@@ -614,11 +659,14 @@ async def _execute_pairs(
         print(f"📊 Прогресс: {i+1}/{len(pairs)}")
         print(f"{'='*60}")
         
-        # Пауза при смене аккаунта
+        # Пауза при смене аккаунта (только если предыдущее действие было успешным)
         giver_name = giver.get("name")
         if current_giver and current_giver != giver_name:
-            delay = get_random_delay(delays.between_accounts_min, delays.between_accounts_max)
-            await countdown_delay(delay, "Смена аккаунта")
+            if last_action_success:
+                delay = get_random_delay(delays.between_accounts_min, delays.between_accounts_max)
+                await countdown_delay(delay, "Смена аккаунта")
+            else:
+                print("⏩ Пропуск задержки после ошибки")
         
         current_giver = giver_name
         
@@ -630,16 +678,19 @@ async def _execute_pairs(
             action_type=action_type,
             channel_url=channel_url,
             timing_config=timing,
+            account_mgr=account_mgr,
             state_mgr=state_mgr if mode == "smart" else None
         )
+        
+        last_action_success = success  # Сохраняем результат для следующей итерации
         
         if success:
             completed += 1
         else:
             failed += 1
         
-        # Пауза между действиями
-        if i < len(pairs) - 1 and not shutdown_handler.is_shutting_down:
+        # Пауза между действиями (только если текущее действие успешно)
+        if i < len(pairs) - 1 and not shutdown_handler.is_shutting_down and success:
             next_giver = pairs[i + 1]["giver"].get("name")
             
             if next_giver == current_giver:
