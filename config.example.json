@@ -1,17 +1,92 @@
 {
     "adspower_api_url": "http://localhost:50325",
     "discord_channel_url": "https://discord.com/channels/YOUR_SERVER_ID/YOUR_CHANNEL_ID",
-    "delay_between_accounts": 8,
-    "delay_between_commands": 5,
-    "timing": {
-        "typing_delay_min": 50,
-        "typing_delay_max": 150,
-        "action_delay_min": 200,
-        "action_delay_max": 500,
-        "autocomplete_wait": 2.0,
-        "command_submit_wait": 3.0,
-        "bot_response_timeout": 5.0
+    
+    "mode": "smart",
+    
+    "modes": {
+        "chain": {
+            "description": "Паровозик - каждый аккаунт кидает на следующего по кругу",
+            "actions_per_account": 1,
+            "both_bless_and_curse": true
+        },
+        "smart": {
+            "description": "Умный режим - автоматически определяет кому нужны bless/curse",
+            "track_progress": true,
+            "respect_daily_limits": true
+        },
+        "target": {
+            "description": "Все аккаунты кидают на указанную цель",
+            "target_username": "target_user_discord_name"
+        },
+        "manual": {
+            "description": "Ручной список пар из файла pairs.json"
+        }
     },
+    
+    "limits": {
+        "enabled": true,
+        "daily_limit_per_account": 5,
+        "target_bless": 10,
+        "target_curse": 10,
+        "max_actions_per_session": 20
+    },
+    
+    "delays": {
+        "preset": "safe",
+        
+        "presets": {
+            "fast": {
+                "between_commands_min": 5,
+                "between_commands_max": 10,
+                "between_accounts_min": 10,
+                "between_accounts_max": 30
+            },
+            "normal": {
+                "between_commands_min": 15,
+                "between_commands_max": 45,
+                "between_accounts_min": 60,
+                "between_accounts_max": 180
+            },
+            "safe": {
+                "between_commands_min": 30,
+                "between_commands_max": 90,
+                "between_accounts_min": 300,
+                "between_accounts_max": 600
+            },
+            "paranoid": {
+                "between_commands_min": 60,
+                "between_commands_max": 180,
+                "between_accounts_min": 600,
+                "between_accounts_max": 1200
+            }
+        },
+        
+        "custom": {
+            "between_commands_min": 30,
+            "between_commands_max": 90,
+            "between_accounts_min": 300,
+            "between_accounts_max": 600
+        }
+    },
+    
+    "random_pauses": {
+        "enabled": true,
+        "chance": 0.2,
+        "min_seconds": 60,
+        "max_seconds": 180
+    },
+    
+    "timing": {
+        "typing_delay_min": 80,
+        "typing_delay_max": 200,
+        "action_delay_min": 500,
+        "action_delay_max": 1500,
+        "autocomplete_wait": 3.0,
+        "command_submit_wait": 4.0,
+        "bot_response_timeout": 8.0
+    },
+    
     "accounts": [
         {
             "name": "Account 1",

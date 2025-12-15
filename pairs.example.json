@@ -1,0 +1,37 @@
+{
+    "_comment": "Пример файла для режима manual. Скопируйте в pairs.json и настройте.",
+    
+    "pairs": [
+        {
+            "giver": "Account 1",
+            "receiver": "Account 2",
+            "action": "bless"
+        },
+        {
+            "giver": "Account 1",
+            "receiver": "Account 2",
+            "action": "curse"
+        },
+        {
+            "giver": "Account 2",
+            "receiver": "Account 3",
+            "action": "bless"
+        },
+        {
+            "giver": "Account 2",
+            "receiver": "Account 3",
+            "action": "curse"
+        },
+        {
+            "giver": "Account 3",
+            "receiver": "Account 1",
+            "action": "bless"
+        },
+        {
+            "giver": "Account 3",
+            "receiver": "Account 1",
+            "action": "curse"
+        }
+    ]
+}
+
