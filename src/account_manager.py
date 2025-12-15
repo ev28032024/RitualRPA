@@ -100,9 +100,20 @@ class AccountManager:
         self.execution_log: List[ExecutionLogEntry] = []
         self._validation_errors: List[str] = []
         self._validation_warnings: List[str] = []
-        self.blocked_accounts_file = "blocked_accounts.json"
-        self._blocked_accounts: Dict[str, Dict[str, Any]] = {}
+        
+        # Файлы для разных типов блокировок
+        self.blocked_accounts_file = "blocked_accounts.json"  # Без доступа к каналу
+        self.unauthorized_accounts_file = "unauthorized_accounts.json"  # Не авторизован
+        
+        # Словари для хранения блокировок
+        self._blocked_accounts: Dict[str, Dict[str, Any]] = {}  # Без доступа к каналу
+        self._unauthorized_accounts: Dict[str, Dict[str, Any]] = {}  # Не авторизован
+        
+        # Настройки блокировок (загружаются из конфига)
+        self.block_accounts_enabled = True  # По умолчанию включено
+        
         self._load_blocked_accounts()
+        self._load_unauthorized_accounts()
     
     # ========================================================================
     # CONFIG LOADING
@@ -119,6 +130,10 @@ class AccountManager:
         try:
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 self.config = json.load(f)
+            
+            # Загружаем настройки блокировок
+            blocking_config = self.config.get("account_blocking", {})
+            self.block_accounts_enabled = blocking_config.get("enabled", True)
             
             # Try Google Sheets first, then fall back to config file
             if not self._try_load_from_google_sheets():
@@ -436,21 +451,35 @@ class AccountManager:
     # ========================================================================
     
     def _load_blocked_accounts(self) -> None:
-        """Загрузить список заблокированных аккаунтов из файла."""
+        """Загрузить список заблокированных аккаунтов (без доступа к каналу) из файла."""
         try:
             if os.path.exists(self.blocked_accounts_file):
                 with open(self.blocked_accounts_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     self._blocked_accounts = data.get("blocked_accounts", {})
-                    logger.info(f"Loaded {len(self._blocked_accounts)} blocked accounts")
+                    logger.info(f"Loaded {len(self._blocked_accounts)} blocked accounts (no channel access)")
             else:
                 self._blocked_accounts = {}
         except Exception as e:
             logger.error(f"Error loading blocked accounts: {e}")
             self._blocked_accounts = {}
     
+    def _load_unauthorized_accounts(self) -> None:
+        """Загрузить список неавторизованных аккаунтов из файла."""
+        try:
+            if os.path.exists(self.unauthorized_accounts_file):
+                with open(self.unauthorized_accounts_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self._unauthorized_accounts = data.get("unauthorized_accounts", {})
+                    logger.info(f"Loaded {len(self._unauthorized_accounts)} unauthorized accounts")
+            else:
+                self._unauthorized_accounts = {}
+        except Exception as e:
+            logger.error(f"Error loading unauthorized accounts: {e}")
+            self._unauthorized_accounts = {}
+    
     def _save_blocked_accounts(self) -> None:
-        """Сохранить список заблокированных аккаунтов в файл."""
+        """Сохранить список заблокированных аккаунтов (без доступа к каналу) в файл."""
         try:
             data = {
                 "blocked_accounts": self._blocked_accounts,
@@ -458,28 +487,76 @@ class AccountManager:
             }
             with open(self.blocked_accounts_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            logger.info(f"Saved {len(self._blocked_accounts)} blocked accounts")
+            logger.info(f"Saved {len(self._blocked_accounts)} blocked accounts (no channel access)")
         except Exception as e:
             logger.error(f"Error saving blocked accounts: {e}")
     
+    def _save_unauthorized_accounts(self) -> None:
+        """Сохранить список неавторизованных аккаунтов в файл."""
+        try:
+            data = {
+                "unauthorized_accounts": self._unauthorized_accounts,
+                "last_updated": datetime.now().isoformat()
+            }
+            with open(self.unauthorized_accounts_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            logger.info(f"Saved {len(self._unauthorized_accounts)} unauthorized accounts")
+        except Exception as e:
+            logger.error(f"Error saving unauthorized accounts: {e}")
+    
     def is_account_blocked(self, account_name: str, adspower_id: Optional[str] = None) -> bool:
         """
-        Проверить, заблокирован ли аккаунт.
+        Проверить, заблокирован ли аккаунт (любой тип блокировки).
         
         Args:
             account_name: Имя аккаунта
             adspower_id: Опциональный AdsPower ID для дополнительной проверки
             
         Returns:
-            True если аккаунт заблокирован
+            True если аккаунт заблокирован (неавторизован или без доступа к каналу)
+        """
+        # Проверяем оба типа блокировок
+        return (self.is_account_unauthorized(account_name, adspower_id) or 
+                self.is_account_channel_blocked(account_name, adspower_id))
+    
+    def is_account_unauthorized(self, account_name: str, adspower_id: Optional[str] = None) -> bool:
+        """
+        Проверить, неавторизован ли аккаунт.
+        
+        Args:
+            account_name: Имя аккаунта
+            adspower_id: Опциональный AdsPower ID для дополнительной проверки
+            
+        Returns:
+            True если аккаунт неавторизован
+        """
+        if account_name in self._unauthorized_accounts:
+            return True
+        
+        if adspower_id:
+            for data in self._unauthorized_accounts.values():
+                if data.get("adspower_id") == adspower_id:
+                    return True
+        
+        return False
+    
+    def is_account_channel_blocked(self, account_name: str, adspower_id: Optional[str] = None) -> bool:
+        """
+        Проверить, заблокирован ли аккаунт из-за отсутствия доступа к каналу.
+        
+        Args:
+            account_name: Имя аккаунта
+            adspower_id: Опциональный AdsPower ID для дополнительной проверки
+            
+        Returns:
+            True если аккаунт заблокирован из-за отсутствия доступа к каналу
         """
         if account_name in self._blocked_accounts:
             return True
         
         if adspower_id:
-            # Проверка по adspower_id
-            for blocked_data in self._blocked_accounts.values():
-                if blocked_data.get("adspower_id") == adspower_id:
+            for data in self._blocked_accounts.values():
+                if data.get("adspower_id") == adspower_id:
                     return True
         
         return False
@@ -489,19 +566,62 @@ class AccountManager:
         account_name: str, 
         adspower_id: str, 
         reason: str = "Нет доступа к каналу",
-        discord_username: Optional[str] = None
+        discord_username: Optional[str] = None,
+        block_type: str = "channel"
     ) -> None:
         """
-        Заблокировать аккаунт (добавить в список заблокированных).
+        Заблокировать аккаунт (добавить в соответствующий список).
         
         Args:
             account_name: Имя аккаунта
             adspower_id: AdsPower ID аккаунта
             reason: Причина блокировки
             discord_username: Discord username (опционально)
+            block_type: Тип блокировки - "channel" (без доступа к каналу) или "unauthorized" (не авторизован)
         """
-        if self.is_account_blocked(account_name, adspower_id):
-            logger.info(f"Account {account_name} already blocked")
+        if not self.block_accounts_enabled:
+            logger.info(f"Account blocking is disabled, skipping block for {account_name}")
+            return
+        
+        if block_type == "unauthorized":
+            self._block_unauthorized_account(account_name, adspower_id, reason, discord_username)
+        else:
+            self._block_channel_account(account_name, adspower_id, reason, discord_username)
+    
+    def _block_unauthorized_account(
+        self,
+        account_name: str,
+        adspower_id: str,
+        reason: str,
+        discord_username: Optional[str] = None
+    ) -> None:
+        """Заблокировать неавторизованный аккаунт."""
+        if self.is_account_unauthorized(account_name, adspower_id):
+            logger.info(f"Account {account_name} already marked as unauthorized")
+            return
+        
+        self._unauthorized_accounts[account_name] = {
+            "account_name": account_name,
+            "adspower_id": adspower_id,
+            "discord_username": discord_username,
+            "reason": reason,
+            "blocked_at": datetime.now().isoformat()
+        }
+        
+        self._save_unauthorized_accounts()
+        logger.warning(f"Account {account_name} marked as unauthorized: {reason}")
+        print(f"🚫 Аккаунт {account_name} помечен как неавторизованный: {reason}")
+    
+    def _block_channel_account(
+        self,
+        account_name: str,
+        adspower_id: str,
+        reason: str,
+        discord_username: Optional[str] = None
+    ) -> None:
+        """Заблокировать аккаунт из-за отсутствия доступа к каналу."""
+        if self.is_account_channel_blocked(account_name, adspower_id):
+            logger.info(f"Account {account_name} already blocked (no channel access)")
             return
         
         self._blocked_accounts[account_name] = {
@@ -513,25 +633,37 @@ class AccountManager:
         }
         
         self._save_blocked_accounts()
-        logger.warning(f"Account {account_name} blocked: {reason}")
-        print(f"🚫 Аккаунт {account_name} заблокирован: {reason}")
+        logger.warning(f"Account {account_name} blocked (no channel access): {reason}")
+        print(f"🚫 Аккаунт {account_name} заблокирован (нет доступа к каналу): {reason}")
     
-    def unblock_account(self, account_name: str) -> bool:
+    def unblock_account(self, account_name: str, block_type: Optional[str] = None) -> bool:
         """
         Разблокировать аккаунт (удалить из списка заблокированных).
         
         Args:
             account_name: Имя аккаунта
+            block_type: Тип блокировки для разблокировки - "channel", "unauthorized" или None (оба)
             
         Returns:
             True если аккаунт был разблокирован
         """
-        if account_name in self._blocked_accounts:
-            del self._blocked_accounts[account_name]
-            self._save_blocked_accounts()
-            logger.info(f"Account {account_name} unblocked")
-            return True
-        return False
+        unblocked = False
+        
+        if block_type is None or block_type == "channel":
+            if account_name in self._blocked_accounts:
+                del self._blocked_accounts[account_name]
+                self._save_blocked_accounts()
+                logger.info(f"Account {account_name} unblocked (channel access)")
+                unblocked = True
+        
+        if block_type is None or block_type == "unauthorized":
+            if account_name in self._unauthorized_accounts:
+                del self._unauthorized_accounts[account_name]
+                self._save_unauthorized_accounts()
+                logger.info(f"Account {account_name} unblocked (unauthorized)")
+                unblocked = True
+        
+        return unblocked
     
     def filter_blocked_accounts(self, accounts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -563,13 +695,35 @@ class AccountManager:
         
         return filtered
     
-    def get_blocked_accounts_list(self) -> List[Dict[str, Any]]:
-        """Получить список всех заблокированных аккаунтов."""
-        return list(self._blocked_accounts.values())
+    def get_blocked_accounts_list(self, block_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Получить список заблокированных аккаунтов.
+        
+        Args:
+            block_type: Тип блокировки - "channel", "unauthorized" или None (оба)
+            
+        Returns:
+            Список заблокированных аккаунтов
+        """
+        if block_type == "channel":
+            return list(self._blocked_accounts.values())
+        elif block_type == "unauthorized":
+            return list(self._unauthorized_accounts.values())
+        else:
+            # Возвращаем оба списка с пометкой типа
+            result = []
+            for data in self._blocked_accounts.values():
+                result.append({**data, "block_type": "channel"})
+            for data in self._unauthorized_accounts.values():
+                result.append({**data, "block_type": "unauthorized"})
+            return result
     
     def print_blocked_accounts(self) -> None:
-        """Вывести список заблокированных аккаунтов."""
-        if not self._blocked_accounts:
+        """Вывести список всех заблокированных аккаунтов."""
+        has_blocked = len(self._blocked_accounts) > 0
+        has_unauthorized = len(self._unauthorized_accounts) > 0
+        
+        if not has_blocked and not has_unauthorized:
             print("✅ Нет заблокированных аккаунтов")
             return
         
@@ -577,15 +731,30 @@ class AccountManager:
         print("🚫 ЗАБЛОКИРОВАННЫЕ АККАУНТЫ")
         print("="*60)
         
-        for account_name, data in self._blocked_accounts.items():
-            reason = data.get("reason", "Неизвестная причина")
-            blocked_at = data.get("blocked_at", "")
-            adspower_id = data.get("adspower_id", "")
-            
-            print(f"\n  🚫 {account_name}")
-            print(f"     AdsPower ID: {adspower_id}")
-            print(f"     Причина: {reason}")
-            if blocked_at:
-                print(f"     Заблокирован: {blocked_at}")
+        if has_unauthorized:
+            print("\n📋 Неавторизованные аккаунты:")
+            for account_name, data in self._unauthorized_accounts.items():
+                reason = data.get("reason", "Неизвестная причина")
+                blocked_at = data.get("blocked_at", "")
+                adspower_id = data.get("adspower_id", "")
+                
+                print(f"\n  🚫 {account_name}")
+                print(f"     AdsPower ID: {adspower_id}")
+                print(f"     Причина: {reason}")
+                if blocked_at:
+                    print(f"     Заблокирован: {blocked_at}")
+        
+        if has_blocked:
+            print("\n📋 Аккаунты без доступа к каналу:")
+            for account_name, data in self._blocked_accounts.items():
+                reason = data.get("reason", "Неизвестная причина")
+                blocked_at = data.get("blocked_at", "")
+                adspower_id = data.get("adspower_id", "")
+                
+                print(f"\n  🚫 {account_name}")
+                print(f"     AdsPower ID: {adspower_id}")
+                print(f"     Причина: {reason}")
+                if blocked_at:
+                    print(f"     Заблокирован: {blocked_at}")
         
         print("="*60 + "\n")

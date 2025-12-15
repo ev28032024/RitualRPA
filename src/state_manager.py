@@ -4,6 +4,7 @@ State Manager
 """
 import json
 import os
+import random
 from datetime import datetime, date
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field, asdict
@@ -331,6 +332,10 @@ class StateManager:
         1. Фильтруем аккаунты которые могут выдавать
         2. Находим аккаунты которым нужны bless/curse (исключая заблокированные)
         3. Строим пары с равномерным распределением
+        4. Перемешиваем пары для случайного порядка выполнения
+        
+        Returns:
+            Список пар действий в случайном порядке
         """
         # Initialize all accounts
         for acc in accounts:
@@ -353,7 +358,14 @@ class StateManager:
         # Build pairs with even distribution
         pairs = self._build_pairs_even(available_givers, needs_list, max_actions)
         
-        logger.info(f"Planned {len(pairs)} actions for today")
+        # Перемешиваем пары для случайного порядка выполнения
+        random.shuffle(pairs)
+        
+        # Обновляем индексы после перемешивания
+        for i, pair in enumerate(pairs, 1):
+            pair["index"] = i
+        
+        logger.info(f"Planned {len(pairs)} actions for today (randomized order)")
         return pairs
     
     def _get_available_givers(

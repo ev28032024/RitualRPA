@@ -95,6 +95,11 @@
         "bot_response_timeout": 8.0
     },
     
+    "account_blocking": {
+        "enabled": true,
+        "_comment": "Управление блокировкой аккаунтов. При enabled=true аккаунты автоматически блокируются при проблемах. Блокировки сохраняются в два файла: unauthorized_accounts.json (неавторизованные) и blocked_accounts.json (без доступа к каналу)"
+    },
+    
     "accounts": [
         {
             "name": "Account 1",
