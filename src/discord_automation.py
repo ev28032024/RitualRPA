@@ -363,8 +363,21 @@ class DiscordAutomation:
                 self._log(f"  ✓ Discord logged in (found: {selector})")
                 return True
             
+            # Если не можем проверить, проверяем наличие элементов, указывающих на неавторизованность
             self._log("  ⚠️ Could not verify Discord login state")
-            return True  # Assume logged in if can't verify
+            
+            # Дополнительная проверка: ищем элементы, указывающие на страницу входа
+            try:
+                login_elements = await self.page.query_selector_all('input[type="email"], input[name="email"]')
+                if login_elements:
+                    self._log("  ❌ Found login form elements - likely not logged in")
+                    return False
+            except Exception:
+                pass
+            
+            # Если URL не содержит /login и нет элементов входа, но и нет подтверждения авторизации,
+            # считаем что авторизован (может быть медленная загрузка)
+            return True
             
         except Exception as e:
             self._log(f"  ❌ Error verifying login: {e}", level="error")
@@ -430,6 +443,33 @@ class DiscordAutomation:
             self._log(f"  ⚠️ Error checking bot response: {e}", level="warning")
             return False
     
+    async def is_direct_message(self) -> bool:
+        """
+        Check if current channel is a direct message (DM).
+        
+        Returns:
+            True if in DM, False if in server channel
+        """
+        try:
+            self._ensure_connected()
+            current_url = self.page.url
+            
+            # Discord DM URLs contain /@me/
+            # Example: https://discord.com/channels/@me/123456789
+            # Server channels: https://discord.com/channels/SERVER_ID/CHANNEL_ID
+            is_dm = "/@me/" in current_url
+            
+            if is_dm:
+                self._log("  ✓ Current channel is a Direct Message")
+            else:
+                self._log("  ℹ️ Current channel is a server channel")
+            
+            return is_dm
+            
+        except Exception as e:
+            self._log(f"  ⚠️ Error checking channel type: {e}", level="warning")
+            return False
+    
     # ========================================================================
     # DEBUGGING
     # ========================================================================
@@ -462,13 +502,14 @@ class DiscordAutomation:
     # NAVIGATION
     # ========================================================================
     
-    async def navigate_to_channel(self, channel_url: str, timeout: int = 45000) -> bool:
+    async def navigate_to_channel(self, channel_url: str, timeout: int = 45000, warn_if_not_dm: bool = True) -> bool:
         """
         Navigate to Discord channel with robust loading checks.
         
         Args:
             channel_url: Discord channel URL
             timeout: Maximum wait time in milliseconds
+            warn_if_not_dm: If True, warn if navigating to a server channel instead of DM
             
         Returns:
             True if navigation successful
@@ -476,6 +517,11 @@ class DiscordAutomation:
         try:
             self._ensure_connected()
             self._log(f"🔗 Navigating to: {channel_url}")
+            
+            # Check if URL is a DM
+            if warn_if_not_dm and "/@me/" not in channel_url:
+                self._log("⚠️ Внимание: это канал сервера, а не личные сообщения!")
+                self._log("  💡 Для работы в личных сообщениях используйте URL вида: https://discord.com/channels/@me/CHANNEL_ID")
             
             # Navigate
             await self.page.goto(channel_url, wait_until="domcontentloaded", timeout=timeout)
@@ -563,7 +609,8 @@ class DiscordAutomation:
         command: str, 
         target_user: Optional[str] = None,
         timeout: int = 20000, 
-        verify_response: bool = True
+        verify_response: bool = True,
+        dm_only: bool = True
     ) -> bool:
         """
         Execute a Discord slash command with human-like behavior.
@@ -573,6 +620,7 @@ class DiscordAutomation:
             target_user: Target user for commands that require it
             timeout: Maximum wait time in milliseconds
             verify_response: Whether to verify bot response
+            dm_only: If True, only execute command in Direct Messages (default: True)
             
         Returns:
             True if command executed successfully
@@ -581,6 +629,13 @@ class DiscordAutomation:
             self._ensure_connected()
             target_str = f" @{target_user}" if target_user else ""
             self._log(f"⚡ Executing command: /{command}{target_str}")
+            
+            # Check if we're in a DM (if dm_only is enabled)
+            if dm_only:
+                if not await self.is_direct_message():
+                    self._log(f"❌ Команда /{command} не выполнена: бот работает только в личных сообщениях")
+                    self._log("  💡 Откройте личные сообщения с ботом для выполнения команд")
+                    return False
             
             # Get last message ID for verification
             before_message_id = await self._get_last_message_id() if verify_response else None
@@ -693,18 +748,40 @@ class DiscordAutomation:
     # CONVENIENCE METHODS
     # ========================================================================
     
-    async def execute_bless(self, target_user: str) -> bool:
-        """Execute /bless command on target user."""
-        return await self.execute_slash_command("bless", target_user)
+    async def execute_bless(self, target_user: str, dm_only: bool = True) -> bool:
+        """
+        Execute /bless command on target user.
+        
+        Args:
+            target_user: Target user for the blessing
+            dm_only: If True, only execute in Direct Messages (default: True)
+        """
+        return await self.execute_slash_command("bless", target_user, dm_only=dm_only)
     
-    async def execute_curse(self, target_user: str) -> bool:
-        """Execute /curse command on target user."""
-        return await self.execute_slash_command("curse", target_user)
+    async def execute_curse(self, target_user: str, dm_only: bool = True) -> bool:
+        """
+        Execute /curse command on target user.
+        
+        Args:
+            target_user: Target user for the curse
+            dm_only: If True, only execute in Direct Messages (default: True)
+        """
+        return await self.execute_slash_command("curse", target_user, dm_only=dm_only)
     
-    async def execute_stats(self) -> bool:
-        """Execute /stats command."""
-        return await self.execute_slash_command("stats")
+    async def execute_stats(self, dm_only: bool = True) -> bool:
+        """
+        Execute /stats command.
+        
+        Args:
+            dm_only: If True, only execute in Direct Messages (default: True)
+        """
+        return await self.execute_slash_command("stats", dm_only=dm_only)
     
-    async def execute_journey(self) -> bool:
-        """Execute /journey command."""
-        return await self.execute_slash_command("journey")
+    async def execute_journey(self, dm_only: bool = True) -> bool:
+        """
+        Execute /journey command.
+        
+        Args:
+            dm_only: If True, only execute in Direct Messages (default: True)
+        """
+        return await self.execute_slash_command("journey", dm_only=dm_only)

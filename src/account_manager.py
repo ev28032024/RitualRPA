@@ -611,6 +611,7 @@ class AccountManager:
         self._save_unauthorized_accounts()
         logger.warning(f"Account {account_name} marked as unauthorized: {reason}")
         print(f"🚫 Аккаунт {account_name} помечен как неавторизованный: {reason}")
+        print(f"   💾 Сохранено в {self.unauthorized_accounts_file}")
     
     def _block_channel_account(
         self,
@@ -635,6 +636,7 @@ class AccountManager:
         self._save_blocked_accounts()
         logger.warning(f"Account {account_name} blocked (no channel access): {reason}")
         print(f"🚫 Аккаунт {account_name} заблокирован (нет доступа к каналу): {reason}")
+        print(f"   💾 Сохранено в {self.blocked_accounts_file}")
     
     def unblock_account(self, account_name: str, block_type: Optional[str] = None) -> bool:
         """

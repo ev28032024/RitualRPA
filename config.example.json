@@ -40,6 +40,18 @@
         "max_actions_per_session": 20
     },
     
+    "parallel": {
+        "enabled": false,
+        "max_workers": 3,
+        "_comment": "Параллельная обработка профилей. enabled=true для одновременной работы 2-3 профилей"
+    },
+    
+    "batch_mode": {
+        "enabled": true,
+        "max_actions_per_session": 10,
+        "_comment": "Пакетный режим: один профиль выполняет несколько действий в одной сессии браузера. enabled=true для оптимизации (меньше запусков браузера)"
+    },
+    
     "delays": {
         "preset": "safe",
         

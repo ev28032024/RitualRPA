@@ -14,7 +14,7 @@ import json
 import random
 import signal
 import sys
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, field
 
 from src.adspower_api import AdsPowerAPI
@@ -67,6 +67,42 @@ class LimitsConfig:
             target_bless=data.get("target_bless", 10),
             target_curse=data.get("target_curse", 10),
             max_actions_per_session=data.get("max_actions_per_session", 20)
+        )
+
+
+
+@dataclass
+class ParallelConfig:
+    """Настройки параллельного выполнения."""
+    enabled: bool = False
+    max_workers: int = 2  # По умолчанию 2-3 профиля параллельно
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ParallelConfig":
+        """Create from dictionary with defaults."""
+        enabled = data.get("enabled", False)
+        # Если параллельность включена, но max_workers не указан, используем 2
+        max_workers = data.get("max_workers", 2 if enabled else 1)
+        # Ограничиваем максимум 5 для безопасности
+        max_workers = min(max_workers, 5)
+        return cls(
+            enabled=enabled,
+            max_workers=max_workers
+        )
+
+
+@dataclass
+class BatchModeConfig:
+    """Настройки пакетного режима (множественные действия с одного профиля)."""
+    enabled: bool = True  # По умолчанию включено - группируем действия по профилю
+    max_actions_per_session: int = 10  # Максимум действий в одной сессии браузера
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "BatchModeConfig":
+        """Create from dictionary with defaults."""
+        return cls(
+            enabled=data.get("enabled", True),
+            max_actions_per_session=data.get("max_actions_per_session", 10)
         )
 
 
@@ -206,6 +242,18 @@ def load_timing_config(account_mgr: AccountManager) -> TimingConfig:
         command_submit_wait=timing.get("command_submit_wait", 4.0),
         bot_response_timeout=timing.get("bot_response_timeout", 8.0)
     )
+
+
+def load_parallel_config(account_mgr: AccountManager) -> ParallelConfig:
+    """Загрузить настройки параллельного выполнения."""
+    parallel_data = account_mgr.get_config_value("parallel", {})
+    return ParallelConfig.from_dict(parallel_data)
+
+
+def load_batch_mode_config(account_mgr: AccountManager) -> BatchModeConfig:
+    """Загрузить настройки пакетного режима."""
+    batch_data = account_mgr.get_config_value("batch_mode", {})
+    return BatchModeConfig.from_dict(batch_data)
 
 
 # ============================================================================
@@ -375,6 +423,36 @@ def get_random_delay(min_val: int, max_val: int) -> float:
     return max(1, base + variation)
 
 
+def group_pairs_by_giver(pairs: List[Dict]) -> List[Tuple[Dict, List[Dict]]]:
+    """
+    Группировать пары по отдающему аккаунту.
+    Возвращает список кортежей (giver, list_of_actions).
+    Каждое действие в list_of_actions содержит receiver и action.
+    """
+    groups = {}
+    
+    # Сохраняем порядок появления
+    order = []
+    
+    for pair in pairs:
+        giver = pair["giver"]
+        giver_name = giver.get("name")
+        
+        if giver_name not in groups:
+            groups[giver_name] = {
+                "giver": giver,
+                "actions": []
+            }
+            order.append(giver_name)
+        
+        groups[giver_name]["actions"].append({
+            "receiver": pair["receiver"],
+            "action": pair["action"]
+        })
+    
+    return [(groups[name]["giver"], groups[name]["actions"]) for name in order]
+
+
 async def maybe_random_pause(pause_config: RandomPauseConfig) -> None:
     """Случайная пауза для имитации человека."""
     if pause_config.enabled and random.random() < pause_config.chance:
@@ -418,6 +496,122 @@ def print_action_header(action_type: str, giver: Dict, receiver: Dict, profile_d
 # ============================================================================
 # ACTION EXECUTOR
 # ============================================================================
+
+
+async def execute_giver_batch(
+    adspower: AdsPowerAPI,
+    giver: Dict[str, Any],
+    actions: List[Dict],
+    channel_url: str,
+    timing_config: TimingConfig,
+    delays: DelayConfig,
+    account_mgr: Optional[AccountManager] = None,
+    state_mgr: Optional[StateManager] = None
+) -> Tuple[int, int]:
+    """
+    Выполнить пакет действий для одного аккаунта (одна сессия браузера).
+    Возвращает (completed, failed).
+    """
+    completed = 0
+    failed = 0
+    
+    giver_name = giver.get("name", "Unknown")
+    adspower_id = giver.get("adspower_id", "")
+    
+    # Проверка на блокировку giver
+    if account_mgr and account_mgr.is_account_blocked(giver_name, adspower_id):
+        print(f"🚫 Аккаунт {giver_name} заблокирован, пропускаем {len(actions)} действий")
+        return 0, 0 # Не считаем как ошибку, просто пропуск
+        
+    # Создаём идентификатор профиля
+    profile = ProfileIdentifier.from_adspower_id(adspower_id, giver_name)
+    
+    if shutdown_handler.is_shutting_down:
+        return 0, 0
+        
+    # Запуск браузера
+    print(f"\n🚀 Запуск браузера для {giver_name} ({len(actions)} действий)...")
+    browser_info = await adspower.start_browser(
+        profile_id=profile.profile_id,
+        serial_number=profile.serial_number
+    )
+    
+    if not browser_info:
+        print(f"❌ Не удалось запустить браузер для {giver_name}")
+        # Записываем все как ошибки
+        for act in actions:
+            if state_mgr:
+                state_mgr.record_action(giver_name, act["receiver"].get("name"), act["action"], False)
+        return 0, len(actions)
+        
+    shutdown_handler.register_profile(profile)
+    
+    try:
+        print(f"⏳ Инициализация браузера {giver_name}...")
+        await asyncio.sleep(5)
+        
+        # Выполняем действия
+        for i, action_data in enumerate(actions):
+            if shutdown_handler.is_shutting_down:
+                break
+                
+            receiver = action_data["receiver"]
+            action_type = action_data["action"]
+            receiver_name = receiver.get("name", "Unknown")
+            receiver_discord = receiver.get("discord_username")
+            receiver_adspower_id = receiver.get("adspower_id", "")
+            
+            # Проверка на блокировку receiver
+            if account_mgr and account_mgr.is_account_blocked(receiver_name, receiver_adspower_id):
+                print(f"🚫 Получатель {receiver_name} заблокирован, пропускаем действие")
+                continue
+                
+            profile_display = f"#{adspower_id}" if adspower_id.isdigit() else adspower_id
+            print_action_header(action_type, giver, receiver, profile_display)
+            
+            # Выполнение действия
+            success = await _execute_discord_action(
+                browser_info, 
+                channel_url, 
+                timing_config, 
+                action_type, 
+                receiver_discord,
+                giver_name,
+                receiver_name,
+                adspower_id,
+                giver.get("discord_username"),
+                account_mgr,
+                state_mgr
+            )
+            
+            if success:
+                completed += 1
+            else:
+                failed += 1
+            
+            if state_mgr:
+                state_mgr.record_action(giver_name, receiver_name, action_type, success)
+                
+            # Пауза между действиями внутри одного сеанса
+            if i < len(actions) - 1 and not shutdown_handler.is_shutting_down:
+                delay = get_random_delay(delays.between_commands_min, delays.between_commands_max)
+                print(f"⏳ Пауза между командами {giver_name}: {delay:.1f} сек...")
+                await asyncio.sleep(delay)
+                
+    finally:
+        # Закрытие браузера
+        print(f"\n🛑 Закрываю браузер {giver_name}...")
+        try:
+            await adspower.stop_browser_async(
+                profile_id=profile.profile_id,
+                serial_number=profile.serial_number
+            )
+            shutdown_handler.unregister_profile(profile)
+        except Exception as e:
+            print(f"⚠️ Ошибка закрытия: {e}")
+            
+    return completed, failed
+
 
 async def execute_action(
     adspower: AdsPowerAPI,
@@ -552,6 +746,7 @@ async def _execute_discord_action(
                 
                 # Блокируем аккаунт как неавторизованный
                 if account_mgr:
+                    print(f"   🔒 Блокирую аккаунт {giver_name}...")
                     account_mgr.block_account(
                         account_name=giver_name,
                         adspower_id=adspower_id,
@@ -559,14 +754,18 @@ async def _execute_discord_action(
                         discord_username=discord_username,
                         block_type="unauthorized"
                     )
+                else:
+                    print(f"   ⚠️ account_mgr не передан, блокировка не выполнена")
                 return False
             
             # Навигация
             print(f"\n🔗 Переход в канал Discord...")
-            if not await discord.navigate_to_channel(channel_url):
+            channel_loaded = await discord.navigate_to_channel(channel_url)
+            
+            if not channel_loaded:
                 print(f"❌ Не удалось открыть канал")
                 
-                # Аккаунт авторизован - проверяем конкретную ошибку доступа
+                # Проверяем конкретную ошибку доступа
                 access_error = await discord._check_channel_access()
                 
                 if access_error:
@@ -574,6 +773,7 @@ async def _execute_discord_action(
                     print(f"   🚫 Обнаружена проблема с доступом: {access_error}")
                     
                     if account_mgr:
+                        print(f"   🔒 Блокирую аккаунт {giver_name}...")
                         account_mgr.block_account(
                             account_name=giver_name,
                             adspower_id=adspower_id,
@@ -581,11 +781,51 @@ async def _execute_discord_action(
                             discord_username=discord_username,
                             block_type="channel"
                         )
+                    else:
+                        print(f"   ⚠️ account_mgr не передан, блокировка не выполнена")
                 else:
-                    # Нет конкретной ошибки доступа - возможно временная проблема
-                    print(f"   ⚠️ Не удалось открыть канал, но конкретная ошибка доступа не обнаружена")
-                    print(f"   💡 Возможно временная проблема или медленная загрузка")
-                    # Не блокируем, если нет конкретной ошибки доступа
+                    # Проверяем, может ли быть проблема с доступом (нет input поля)
+                    # Если канал загрузился, но нет input - это проблема доступа
+                    try:
+                        # Проверяем наличие input поля для сообщений
+                        input_selector = 'div[role="textbox"][aria-label*="Message"], div[role="textbox"][data-slate-editor="true"], div[role="textbox"]'
+                        input_elem = await discord.page.query_selector(input_selector)
+                        
+                        if not input_elem:
+                            # Канал открыт, но нет доступа к отправке сообщений
+                            print(f"   🚫 Канал открыт, но нет доступа к отправке сообщений")
+                            
+                            if account_mgr:
+                                print(f"   🔒 Блокирую аккаунт {giver_name}...")
+                                account_mgr.block_account(
+                                    account_name=giver_name,
+                                    adspower_id=adspower_id,
+                                    reason="Нет доступа к отправке сообщений в канале",
+                                    discord_username=discord_username,
+                                    block_type="channel"
+                                )
+                            else:
+                                print(f"   ⚠️ account_mgr не передан, блокировка не выполнена")
+                        else:
+                            # Есть input, но канал не загрузился полностью - возможно временная проблема
+                            print(f"   ⚠️ Не удалось открыть канал, но конкретная ошибка доступа не обнаружена")
+                            print(f"   💡 Возможно временная проблема или медленная загрузка")
+                            # Не блокируем, если есть input поле - значит доступ есть
+                    except Exception as e:
+                        # Ошибка при проверке - блокируем для безопасности
+                        print(f"   🚫 Ошибка при проверке доступа: {e}")
+                        
+                        if account_mgr:
+                            print(f"   🔒 Блокирую аккаунт {giver_name}...")
+                            account_mgr.block_account(
+                                account_name=giver_name,
+                                adspower_id=adspower_id,
+                                reason=f"Проблема с доступом к каналу: {str(e)[:100]}",
+                                discord_username=discord_username,
+                                block_type="channel"
+                            )
+                        else:
+                            print(f"   ⚠️ account_mgr не передан, блокировка не выполнена")
                 
                 return False
             
@@ -626,6 +866,8 @@ async def run_session(
     limits: LimitsConfig,
     pauses: RandomPauseConfig,
     timing: TimingConfig,
+    parallel: ParallelConfig,
+    batch_mode: BatchModeConfig,
     max_actions: Optional[int] = None
 ) -> None:
     """Запуск сессии автоматизации."""
@@ -660,7 +902,7 @@ async def run_session(
     
     # Выполнение
     completed, failed = await _execute_pairs(
-        pairs, adspower, channel_url, timing, delays, pauses, account_mgr, state_mgr, mode
+        pairs, adspower, channel_url, timing, delays, pauses, parallel, batch_mode, account_mgr, state_mgr, mode
     )
     
     _print_session_summary(completed, failed)
@@ -738,71 +980,146 @@ async def _execute_pairs(
     timing: TimingConfig,
     delays: DelayConfig,
     pauses: RandomPauseConfig,
+    parallel: ParallelConfig,
+    batch_mode: BatchModeConfig,
     account_mgr: AccountManager,
     state_mgr: StateManager,
     mode: str
 ) -> tuple:
-    """Выполнить все пары действий."""
-    completed = 0
-    failed = 0
-    current_giver = None
-    last_action_success = True  # Флаг успеха предыдущего действия
+    """Выполнить все пары действий (параллельно или последовательно)."""
     
-    for i, pair in enumerate(pairs):
+    # 1. Группируем по giver'у для оптимизации (один запуск браузера = много действий)
+    if batch_mode.enabled:
+        groups = group_pairs_by_giver(pairs)
+        # Ограничиваем количество действий на сессию
+        if batch_mode.max_actions_per_session > 0:
+            limited_groups = []
+            for giver, actions in groups:
+                if len(actions) > batch_mode.max_actions_per_session:
+                    # Разбиваем на несколько групп
+                    for i in range(0, len(actions), batch_mode.max_actions_per_session):
+                        limited_groups.append((giver, actions[i:i + batch_mode.max_actions_per_session]))
+                else:
+                    limited_groups.append((giver, actions))
+            groups = limited_groups
+        print(f"\n🧩 Сгруппировано в {len(groups)} сессий (запусков браузера).")
+        print(f"   📦 Пакетный режим: до {batch_mode.max_actions_per_session} действий на сессию")
+    else:
+        # Если пакетный режим выключен, каждое действие в отдельной сессии
+        groups = [(pair["giver"], [{"receiver": pair["receiver"], "action": pair["action"]}]) for pair in pairs]
+        print(f"\n🧩 Режим без группировки: {len(groups)} сессий (по 1 действию на сессию)")
+    
+    if parallel.enabled and parallel.max_workers > 1:
+        print(f"🚀 Включен параллельный режим (max {parallel.max_workers} профилей одновременно)")
+        return await _execute_parallel(
+            groups, adspower, channel_url, timing, delays, parallel, account_mgr, state_mgr
+        )
+    else:
+        print(f"🐢 Последовательный режим выполнения")
+        return await _execute_sequential(
+             groups, adspower, channel_url, timing, delays, pauses, account_mgr, state_mgr
+        )
+
+
+async def _execute_sequential(
+    groups: List[Tuple[Dict, List[Dict]]],
+    adspower: AdsPowerAPI,
+    channel_url: str,
+    timing: TimingConfig,
+    delays: DelayConfig,
+    pauses: RandomPauseConfig,
+    account_mgr: AccountManager,
+    state_mgr: StateManager
+) -> Tuple[int, int]:
+    """Последовательное выполнение групп."""
+    total_completed = 0
+    total_failed = 0
+    
+    for i, (giver, actions) in enumerate(groups):
         if shutdown_handler.is_shutting_down:
             print("\n⚠️ Прерывание...")
             break
-        
-        giver = pair["giver"]
-        receiver = pair["receiver"]
-        action_type = pair["action"]
-        
+            
         print(f"\n{'='*60}")
-        print(f"📊 Прогресс: {i+1}/{len(pairs)}")
+        print(f"👤 Сессия {i+1}/{len(groups)}: {giver.get('name')} ({len(actions)} действий)")
         print(f"{'='*60}")
         
-        # Пауза при смене аккаунта (только если предыдущее действие было успешным)
-        giver_name = giver.get("name")
-        if current_giver and current_giver != giver_name:
-            if last_action_success:
-                delay = get_random_delay(delays.between_accounts_min, delays.between_accounts_max)
-                await countdown_delay(delay, "Смена аккаунта")
-            else:
-                print("⏩ Пропуск задержки после ошибки")
-        
-        current_giver = giver_name
-        
-        # Выполняем действие
-        success = await execute_action(
+        # Выполняем пакет действий
+        c, f = await execute_giver_batch(
             adspower=adspower,
-            giver=giver,
-            receiver=receiver,
-            action_type=action_type,
+            giver=giver, 
+            actions=actions,
             channel_url=channel_url,
             timing_config=timing,
+            delays=delays,
             account_mgr=account_mgr,
-            state_mgr=state_mgr if mode == "smart" else None
+            state_mgr=state_mgr
         )
+        total_completed += c
+        total_failed += f
         
-        last_action_success = success  # Сохраняем результат для следующей итерации
-        
-        if success:
-            completed += 1
-        else:
-            failed += 1
-        
-        # Пауза между действиями (только если текущее действие успешно)
-        if i < len(pairs) - 1 and not shutdown_handler.is_shutting_down and success:
-            next_giver = pairs[i + 1]["giver"].get("name")
-            
-            if next_giver == current_giver:
-                delay = get_random_delay(delays.between_commands_min, delays.between_commands_max)
-                print(f"\n⏳ Пауза: {delay:.0f} сек...")
-                await asyncio.sleep(delay)
-            
+        # Пауза между аккаунтами
+        if i < len(groups) - 1 and not shutdown_handler.is_shutting_down:
+            delay = get_random_delay(delays.between_accounts_min, delays.between_accounts_max)
+            await countdown_delay(delay, "Смена аккаунта")
             await maybe_random_pause(pauses)
+            
+    return total_completed, total_failed
+
+
+async def _execute_parallel(
+    groups: List[Tuple[Dict, List[Dict]]],
+    adspower: AdsPowerAPI,
+    channel_url: str,
+    timing: TimingConfig,
+    delays: DelayConfig,
+    parallel: ParallelConfig,
+    account_mgr: AccountManager,
+    state_mgr: StateManager
+) -> Tuple[int, int]:
+    """Параллельное выполнение групп."""
+    semaphore = asyncio.Semaphore(parallel.max_workers)
+    total_completed = 0
+    total_failed = 0
+    completed_lock = asyncio.Lock()  # Для потокобезопасного обновления счётчиков
     
-    return completed, failed
+    async def worker(giver, actions, worker_id: int):
+        nonlocal total_completed, total_failed
+        async with semaphore:
+            if shutdown_handler.is_shutting_down:
+                return
+                
+            giver_name = giver.get('name', 'Unknown')
+            print(f"\n{'='*60}")
+            print(f"🚀 [Поток {worker_id}] Старт для {giver_name} ({len(actions)} действий)")
+            print(f"{'='*60}")
+            
+            try:
+                c, f = await execute_giver_batch(
+                    adspower=adspower,
+                    giver=giver, 
+                    actions=actions,
+                    channel_url=channel_url,
+                    timing_config=timing,
+                    delays=delays,
+                    account_mgr=account_mgr,
+                    state_mgr=state_mgr
+                )
+                
+                async with completed_lock:
+                    total_completed += c
+                    total_failed += f
+                
+                print(f"\n✅ [Поток {worker_id}] Завершено для {giver_name}: {c} успешно, {f} ошибок")
+            except Exception as e:
+                print(f"\n❌ [Поток {worker_id}] Ошибка для {giver_name}: {e}")
+                async with completed_lock:
+                    total_failed += len(actions)
+            
+    tasks = [worker(g, a, i+1) for i, (g, a) in enumerate(groups)]
+    await asyncio.gather(*tasks, return_exceptions=True)
+    
+    return total_completed, total_failed
 
 
 def _print_session_summary(completed: int, failed: int) -> None:
@@ -848,6 +1165,8 @@ async def main_async(args) -> None:
         limits = load_limits_config(account_mgr)
         pauses = load_pause_config(account_mgr)
         timing = load_timing_config(account_mgr)
+        parallel = load_parallel_config(account_mgr)
+        batch_mode = load_batch_mode_config(account_mgr)
         channel_url = account_mgr.get_config_value("discord_channel_url")
         
         if not channel_url:
@@ -860,6 +1179,10 @@ async def main_async(args) -> None:
         print(f"   Задержки: {delays.between_commands_min}-{delays.between_commands_max}с")
         print(f"   Лимиты: {'включены' if limits.enabled else 'выключены'}")
         print(f"   Случайные паузы: {'включены' if pauses.enabled else 'выключены'}")
+        if batch_mode.enabled:
+            print(f"   Пакетный режим: до {batch_mode.max_actions_per_session} действий на профиль")
+        if parallel.enabled:
+            print(f"   Параллельность: {parallel.max_workers} профилей одновременно")
         
         # Режим статуса
         if args.status:
@@ -888,6 +1211,8 @@ async def main_async(args) -> None:
             limits=limits,
             pauses=pauses,
             timing=timing,
+            parallel=parallel,
+            batch_mode=batch_mode,
             max_actions=args.limit
         )
         
